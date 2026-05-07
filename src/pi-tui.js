@@ -2,6 +2,7 @@ export {
   Container,
   Editor,
   Loader,
+  Markdown,
   ProcessTerminal,
   SelectList,
   Spacer,

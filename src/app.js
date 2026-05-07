@@ -1,7 +1,13 @@
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { Container, Editor, Loader, ProcessTerminal, SelectList, Spacer, Text, TUI, matchesKey } from "./pi-tui.js";
-import { ClaudeCliAgent, CodexCliAgent } from "./agents/cli-agents.js";
+import { Container, Editor, Loader, Markdown, ProcessTerminal, SelectList, Spacer, Text, TUI, matchesKey } from "./pi-tui.js";
+import {
+  ClaudeAcpxAgent,
+  ClaudeCliAgent,
+  CodexAcpxAgent,
+  CodexCliAgent,
+  normalizeAgentPermissionPolicy,
+} from "./agents/cli-agents.js";
 import { MockAgent } from "./agents/mock-agent.js";
 import { PartyRouter } from "./runtime/router.js";
 import { readEvents, visibleHistoryFromEvents } from "./runtime/transcript.js";
@@ -24,6 +30,28 @@ const palette = {
 };
 
 const APP_TITLE = "Context Party";
+const PERMISSION_POLICIES = [
+  {
+    value: "approve-reads",
+    label: "Approve Reads",
+    description: "Read/search allowed; writes or shell prompts fail.",
+  },
+  {
+    value: "approve-all",
+    label: "Approve All",
+    description: "Allow agent tool permissions without prompting.",
+  },
+  {
+    value: "deny-all",
+    label: "Deny All",
+    description: "Deny all ACPX permission requests.",
+  },
+  {
+    value: "fail",
+    label: "Fail",
+    description: "Fail immediately when permission prompting is needed.",
+  },
+];
 
 const tuiTheme = {
   borderColor: (text) => `${palette.gray}${text}${palette.reset}`,
@@ -36,6 +64,23 @@ const tuiTheme = {
   },
 };
 
+const markdownTheme = {
+  heading: (text) => `${palette.bold}${palette.cyan}${text}${palette.reset}`,
+  link: (text) => `${palette.cyan}${text}${palette.reset}`,
+  linkUrl: (text) => `${palette.gray}${text}${palette.reset}`,
+  code: (text) => `${palette.yellow}${text}${palette.reset}`,
+  codeBlock: (text) => `${palette.gray}${text}${palette.reset}`,
+  codeBlockBorder: (text) => `${palette.dim}${text}${palette.reset}`,
+  quote: (text) => `${palette.dim}${text}${palette.reset}`,
+  quoteBorder: (text) => `${palette.gray}${text}${palette.reset}`,
+  hr: (text) => `${palette.gray}${text}${palette.reset}`,
+  listBullet: (text) => `${palette.cyan}${text}${palette.reset}`,
+  bold: (text) => `${palette.bold}${text}${palette.reset}`,
+  italic: (text) => `\x1b[3m${text}${palette.reset}`,
+  strikethrough: (text) => `\x1b[9m${text}${palette.reset}`,
+  underline: (text) => `\x1b[4m${text}${palette.reset}`,
+};
+
 function colorize(enabled, color, text) {
   if (!enabled) return text;
   return `${palette[color] ?? ""}${text}${palette.reset}`;
@@ -45,11 +90,22 @@ function formatMessageLabel(author, color, enabled = true) {
   return colorize(enabled, color, `[${author}]`);
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function createParticipants(options = {}) {
   if (options.participants === "real") {
+    if (process.env.CTXPARTY_AGENT_BACKEND === "raw") {
+      return [
+        new CodexCliAgent({ color: "blue", timeoutMs: options.agentTimeoutMs }),
+        new ClaudeCliAgent({ color: "orange", timeoutMs: options.agentTimeoutMs }),
+      ];
+    }
+
     return [
-      new CodexCliAgent({ color: "blue", timeoutMs: options.agentTimeoutMs }),
-      new ClaudeCliAgent({ color: "orange", timeoutMs: options.agentTimeoutMs }),
+      new CodexAcpxAgent({ color: "blue", timeoutMs: options.agentTimeoutMs, permissionPolicy: options.permissionPolicy }),
+      new ClaudeAcpxAgent({ color: "orange", timeoutMs: options.agentTimeoutMs, permissionPolicy: options.permissionPolicy }),
     ];
   }
 
@@ -134,6 +190,8 @@ class ConsoleScreen {
     this.color = color;
     this.workspace = workspace;
     this.history = [...initialHistory];
+    this.lastErrorText = undefined;
+    this.lastErrorAt = 0;
   }
 
   header() {
@@ -152,6 +210,12 @@ class ConsoleScreen {
   event(event) {
     if (event.type === "message") {
       this.message(event.author, event.text, event.color);
+    } else if (event.type === "message_delta") {
+      return;
+    } else if (event.type === "thought_delta") {
+      this.thought(event);
+    } else if (event.type === "silent") {
+      return;
     } else if (event.type === "status") {
       this.status(event.text);
     } else if (event.type === "error") {
@@ -175,7 +239,16 @@ class ConsoleScreen {
     console.log(colorize(this.color, "gray", `  ${text}`));
   }
 
+  thought(event) {
+    const label = event.author ? `${event.author} thinking` : "thinking";
+    console.log(colorize(this.color, "gray", `  ${label}: ${event.text}`));
+  }
+
   error(text) {
+    const now = Date.now();
+    if (text === this.lastErrorText && now - this.lastErrorAt < 2000) return;
+    this.lastErrorText = text;
+    this.lastErrorAt = now;
     console.log(colorize(this.color, "red", `  ${text}`));
   }
 
@@ -229,7 +302,13 @@ class PiTuiScreen {
     this.chat = new Container();
     this.statusContainer = new Container();
     this.activeLoader = undefined;
+    this.activeLoaderMessage = undefined;
+    this.activeAgents = new Map();
     this.activeResumeList = undefined;
+    this.streamingMessages = new Map();
+    this.lastErrorText = undefined;
+    this.lastErrorAt = 0;
+    this.lastPinnedRenderAt = 0;
     this.isSubmitting = false;
     this.onInterrupt = undefined;
     this.editor = new Editor(this.tui, tuiTheme, { paddingX: 1, autocompleteMaxVisible: 8 });
@@ -355,8 +434,20 @@ ${palette.gray}Enter sends. Ctrl+Enter adds lines. Esc interrupts agents. Ctrl+C
   event(event) {
     if (event.type === "message") {
       this.message(event.author, event.text, event.color);
+    } else if (event.type === "message_delta") {
+      this.messageDelta(event);
+    } else if (event.type === "thought_delta") {
+      this.thoughtDelta(event);
+    } else if (event.type === "silent") {
+      this.silent(event);
     } else if (event.type === "status") {
-      this.status(event.text);
+      this.status(event);
+    } else if (event.type === "agent_command") {
+      this.agentCommand(event);
+    } else if (event.type === "agent_started") {
+      this.agentStarted(event);
+    } else if (event.type === "agent_finished") {
+      this.agentFinished(event);
     } else if (event.type === "error") {
       this.error(event.text);
     }
@@ -367,13 +458,45 @@ ${palette.gray}Enter sends. Ctrl+Enter adds lines. Esc interrupts agents. Ctrl+C
     this.tui.requestRender();
   }
 
+  requestChatRender(pinBottom = false) {
+    if (!pinBottom) {
+      this.tui.requestRender();
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastPinnedRenderAt > 250) {
+      this.lastPinnedRenderAt = now;
+      this.tui.requestRender(true);
+      return;
+    }
+    this.tui.requestRender();
+  }
+
   addHistoryLine(item) {
-    const label = formatMessageLabel(item.author, item.color);
-    this.addLine(`${label}\n${item.text}\n`);
+    this.addMessageComponent(item.author, item.text, item.color);
+  }
+
+  createMessageComponent(author, text, color = "green") {
+    const container = new Container();
+    const label = formatMessageLabel(author, color);
+    const body = new Markdown(text, 1, 0, markdownTheme);
+    container.addChild(new Text(label, 1, 0));
+    container.addChild(body);
+    container.addChild(new Spacer(1));
+    return { container, body };
+  }
+
+  addMessageComponent(author, text, color = "green") {
+    const message = this.createMessageComponent(author, text, color);
+    this.chat.addChild(message.container);
+    this.requestChatRender(true);
+    return message;
   }
 
   replaceHistory(history) {
     this.history = [...history];
+    this.streamingMessages.clear();
     this.chat.clear();
     for (const item of this.history) {
       this.addHistoryLine(item);
@@ -432,11 +555,102 @@ ${palette.gray}Enter sends. Ctrl+Enter adds lines. Esc interrupts agents. Ctrl+C
     });
   }
 
+  showPermissionPicker(participants, onSelect) {
+    const current = participants.map((participant) => participant.permissionPolicy).find(Boolean) || "approve-reads";
+    return new Promise((resolve) => {
+      const items = PERMISSION_POLICIES.map((policy) => ({
+        value: policy.value,
+        label: `${policy.label}${policy.value === current ? " *" : ""}`,
+        description: policy.description,
+      }));
+      const list = new SelectList(items, 6, tuiTheme.selectList, {
+        minPrimaryColumnWidth: 18,
+        maxPrimaryColumnWidth: 26,
+      });
+      const container = new Container();
+      container.addChild(
+        new Text(
+          `${palette.gray}Select ACPX permission policy for future agent turns. Enter selects, Esc cancels.${palette.reset}`,
+          1,
+          0,
+        ),
+      );
+      container.addChild(list);
+
+      const closePicker = () => {
+        this.activeResumeList = undefined;
+        this.setStatusComponent(undefined);
+        this.tui.setFocus(this.editor);
+        this.tui.requestRender(true);
+      };
+
+      list.onSelect = (item) => {
+        closePicker();
+        onSelect(item.value);
+        resolve();
+      };
+      list.onCancel = () => {
+        closePicker();
+        this.status("Permission policy unchanged.");
+        resolve();
+      };
+
+      this.activeResumeList = list;
+      this.setStatusComponent(container);
+    });
+  }
+
   message(author, text, color = "green") {
-    this.setStatusComponent(undefined);
-    const label = formatMessageLabel(author, color);
-    this.addLine(`${label}\n${text}\n`);
+    this.clearStatusOrRenderActiveAgents();
+    const streaming = this.streamingMessages.get(author);
+    if (streaming) {
+      streaming.body.setText(text);
+      this.streamingMessages.delete(author);
+      this.requestChatRender(true);
+      this.history.push({ author, text, color });
+      return;
+    }
+
+    this.addMessageComponent(author, text, color);
     this.history.push({ author, text, color });
+  }
+
+  messageDelta(event) {
+    const author = event.author;
+    const accumulatedText = event.accumulatedText ?? event.text;
+    let streaming = this.streamingMessages.get(author);
+    if (!streaming) {
+      this.clearStatusOrRenderActiveAgents();
+      streaming = this.createMessageComponent(author, accumulatedText, event.color);
+      this.chat.addChild(streaming.container);
+      this.streamingMessages.set(author, streaming);
+    } else {
+      streaming.body.setText(accumulatedText);
+    }
+    this.requestChatRender(true);
+  }
+
+  silent(event) {
+    const author = event.author;
+    if (!author) return;
+    const streaming = this.streamingMessages.get(author);
+    if (streaming) {
+      this.chat.removeChild(streaming.container);
+      this.streamingMessages.delete(author);
+      this.requestChatRender(true);
+    }
+  }
+
+  thoughtDelta(event) {
+    const text = event.text?.trim();
+    if (!text) return;
+    if (this.activeAgents.size > 1) {
+      this.renderActiveAgentStatus();
+      return;
+    }
+    this.setStatusComponent(
+      new Text(`${palette.gray}${event.author ?? "Agent"} thinking: ${text}${palette.reset}`, 1, 0),
+    );
   }
 
   info(text) {
@@ -447,6 +661,7 @@ ${palette.gray}Enter sends. Ctrl+Enter adds lines. Esc interrupts agents. Ctrl+C
     if (this.activeLoader) {
       this.activeLoader.stop();
       this.activeLoader = undefined;
+      this.activeLoaderMessage = undefined;
     }
   }
 
@@ -460,31 +675,178 @@ ${palette.gray}Enter sends. Ctrl+Enter adds lines. Esc interrupts agents. Ctrl+C
   }
 
   status(text) {
-    if (/\b(thinking|working|loading|running)\b/i.test(text)) {
-      const loader = new Loader(
-        this.tui,
-        (value) => `${palette.green}${value}${palette.reset}`,
-        (value) => `${palette.gray}${value}${palette.reset}`,
-        text,
-      );
-      this.activeLoader = loader;
-      this.statusContainer.clear();
-      this.statusContainer.addChild(loader);
-      loader.start();
+    const event = typeof text === "string" ? { text } : text;
+    const statusText = event.text;
+    if (!statusText) return;
+
+    if (event.participantId && this.activeAgents.has(event.participantId)) {
+      const current = this.activeAgents.get(event.participantId);
+      this.activeAgents.set(event.participantId, {
+        ...current,
+        text: statusText,
+        progress: this.parseAgentProgress(statusText),
+      });
+      this.renderActiveAgentStatus();
+      return;
+    }
+
+    if (this.isLoadingStatus(statusText)) {
+      this.setLoadingStatus(statusText);
+      return;
+    }
+
+    this.setStatusComponent(new Text(`${palette.gray}${statusText}${palette.reset}`, 1, 0));
+  }
+
+  setLoadingStatus(text) {
+    if (this.activeLoader) {
+      if (this.activeLoaderMessage !== text) {
+        this.activeLoader.setMessage(text);
+        this.activeLoaderMessage = text;
+      }
       this.tui.requestRender();
       return;
     }
 
-    this.setStatusComponent(new Text(`${palette.gray}${text}${palette.reset}`, 1, 0));
+    const loader = new Loader(
+      this.tui,
+      (value) => `${palette.green}${value}${palette.reset}`,
+      (value) => `${palette.gray}${value}${palette.reset}`,
+      text,
+    );
+    this.activeLoader = loader;
+    this.activeLoaderMessage = text;
+    this.statusContainer.clear();
+    this.statusContainer.addChild(loader);
+    loader.start();
+    this.tui.requestRender();
+  }
+
+  agentStarted(event) {
+    if (!event.participantId) return;
+    this.activeAgents.set(event.participantId, {
+      label: event.label ?? event.participantId,
+      text: `${event.label ?? "Agent"} thinking...`,
+      progress: undefined,
+      command: undefined,
+    });
+    this.renderActiveAgentStatus();
+  }
+
+  agentCommand(event) {
+    if (!event.participantId || !this.activeAgents.has(event.participantId)) return;
+    const current = this.activeAgents.get(event.participantId);
+    this.activeAgents.set(event.participantId, {
+      ...current,
+      command: event.command,
+    });
+    this.renderActiveAgentStatus();
+  }
+
+  agentFinished(event) {
+    if (event.participantId) {
+      this.activeAgents.delete(event.participantId);
+    }
+    this.clearStatusOrRenderActiveAgents();
+  }
+
+  clearStatusOrRenderActiveAgents() {
+    if (this.activeAgents.size > 0) {
+      this.renderActiveAgentStatus();
+      return;
+    }
+    this.setStatusComponent(undefined);
+  }
+
+  renderActiveAgentStatus() {
+    if (this.activeAgents.size === 0) return;
+    if (this.activeAgents.size === 1) {
+      const [agent] = this.activeAgents.values();
+      const statusText = this.agentStatusText(agent);
+      if (statusText) {
+        this.setLoadingStatus(statusText);
+      }
+      return;
+    }
+    this.setLoadingStatus(this.collectiveAgentStatusText());
+  }
+
+  collectiveAgentStatusText() {
+    const agents = Array.from(this.activeAgents.values());
+    const progress = agents
+      .map((agent) => agent.progress)
+      .filter(Boolean);
+    const elapsed = progress.map((item) => item.elapsedSeconds).filter(Number.isFinite);
+    const remaining = progress.map((item) => item.remainingSeconds).filter(Number.isFinite);
+    const elapsedText = elapsed.length > 0 ? ` for ${Math.max(...elapsed)}s` : "";
+    const remainingText = remaining.length > 0 ? `; timeout in ${Math.min(...remaining)}s` : "";
+    const lines = [`Agents are running${elapsedText}${remainingText}`];
+    for (const agent of agents) {
+      lines.push(this.agentStatusText(agent));
+    }
+    return lines.join("\n");
+  }
+
+  agentStatusText(agent) {
+    const label = agent.label ?? "Agent";
+    const phase = this.agentPhaseText(agent);
+    const command = this.compactAgentCommand(agent.command);
+    return `${label}: ${phase}${command ? ` | ${command}` : ""}`;
+  }
+
+  agentPhaseText(agent) {
+    if (agent.progress?.elapsedSeconds != null || agent.progress?.remainingSeconds != null) {
+      const parts = [];
+      if (agent.progress.elapsedSeconds != null) parts.push(`running ${agent.progress.elapsedSeconds}s`);
+      if (agent.progress.inactiveSeconds != null) parts.push(`inactive ${agent.progress.inactiveSeconds}s`);
+      if (agent.progress.remainingSeconds != null) parts.push(`timeout ${agent.progress.remainingSeconds}s`);
+      return parts.join(", ");
+    }
+    return this.compactAgentStatusText(agent.text, agent.label);
+  }
+
+  compactAgentStatusText(text, label) {
+    if (!text) return "starting";
+    if (!label) return text;
+    return text.replace(new RegExp(`^${escapeRegExp(label)}\\s+`, "i"), "");
+  }
+
+  compactAgentCommand(command) {
+    if (!command) return "";
+    return command
+      .replace(/(?:^|\s)(?:[A-Z]:\\[^\s]+\\)?acpx(?:\.cmd)?\b/i, " acpx")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  parseAgentProgress(text) {
+    const elapsedMatch = text.match(/\brunning for (\d+)s\b/i);
+    const inactiveMatch = text.match(/\binactive for (\d+)s\b/i);
+    const remainingMatch = text.match(/\btimeout in (\d+)s\b/i);
+    return {
+      elapsedSeconds: elapsedMatch ? Number.parseInt(elapsedMatch[1], 10) : undefined,
+      inactiveSeconds: inactiveMatch ? Number.parseInt(inactiveMatch[1], 10) : undefined,
+      remainingSeconds: remainingMatch ? Number.parseInt(remainingMatch[1], 10) : undefined,
+    };
+  }
+
+  isLoadingStatus(text) {
+    if (/^Interrupted\b/i.test(text)) return false;
+    return /\b(thinking|working|loading|running)\.{3}$/i.test(text) || /\b(loading|running)\b/i.test(text);
   }
 
   error(text) {
+    const now = Date.now();
+    if (text === this.lastErrorText && now - this.lastErrorAt < 2000) return;
+    this.lastErrorText = text;
+    this.lastErrorAt = now;
     this.setStatusComponent(undefined);
     this.addLine(`${palette.red}${text}${palette.reset}`);
   }
 
   clear() {
     this.chat.clear();
+    this.streamingMessages.clear();
     this.setStatusComponent(undefined);
     this.tui.requestRender(true);
   }
@@ -526,9 +888,11 @@ function commandHelp() {
     "/help                  Show commands.",
     "/agents                List participants.",
     "@codex / @claude       Mention a participant for a direct reply only.",
-    "@all                   Ask all participants once without follow-up routing.",
+    "message without @      Ask all participants once.",
+    "@all                   Ask all participants explicitly.",
     "/mute <participant>    Mute a participant.",
     "/unmute <participant>  Unmute a participant.",
+    "/permissions [policy]  Show or set ACPX permission policy.",
     "/workspace             Show workspace paths.",
     "/history               Replay visible message history.",
     "/resume [session]      Show resumable sessions, or resume one by number/name/path.",
@@ -539,6 +903,18 @@ function commandHelp() {
 
 function normalizeParticipantName(value) {
   return value.trim().toLowerCase();
+}
+
+function normalizePermissionCommandValue(value) {
+  const normalized = normalizeAgentPermissionPolicy(value);
+  const known = new Set(PERMISSION_POLICIES.map((policy) => policy.value));
+  return known.has(normalized) ? normalized : "approve-reads";
+}
+
+function permissionPolicyText(policy) {
+  const normalized = normalizePermissionCommandValue(policy);
+  const item = PERMISSION_POLICIES.find((entry) => entry.value === normalized);
+  return item ? `${item.label} (${item.value})` : normalized;
 }
 
 async function handleCommand(inputText, router, screen) {
@@ -554,10 +930,44 @@ async function handleCommand(inputText, router, screen) {
       .listParticipants()
       .map((participant) => {
         const muted = participant.muted ? " muted" : "";
-        return `${participant.label} (${participant.id})${muted}`;
+        const permissions = participant.permissionPolicy ? ` permissions=${participant.permissionPolicy}` : "";
+        return `${participant.label} (${participant.id})${muted}${permissions}`;
       })
       .join("\n");
     screen.info(agents);
+    return true;
+  }
+  if (command === "/permissions") {
+    if (!arg.trim()) {
+      if (typeof screen.showPermissionPicker === "function") {
+        await screen.showPermissionPicker(router.listParticipants(), (policy) => {
+          if (router.setPermissionPolicy(policy)) {
+            screen.status(`Permission policy: ${permissionPolicyText(policy)}`);
+          } else {
+            screen.status("Permission policy only applies to ACPX real agents.");
+          }
+        });
+      } else {
+        screen.info(
+          [
+            "Usage: /permissions <approve-reads|approve-all|deny-all|fail>",
+            `Current: ${router.listParticipants().map((participant) => participant.permissionPolicy).filter(Boolean).join(", ") || "n/a"}`,
+          ].join("\n"),
+        );
+      }
+      return true;
+    }
+
+    const policy = normalizePermissionCommandValue(arg);
+    if (policy !== arg.trim().toLowerCase() && arg.trim().toLowerCase() !== "deny") {
+      screen.error("Usage: /permissions <approve-reads|approve-all|deny-all|fail>");
+      return true;
+    }
+    if (router.setPermissionPolicy(policy)) {
+      screen.status(`Permission policy: ${permissionPolicyText(policy)}`);
+    } else {
+      screen.status("Permission policy only applies to ACPX real agents.");
+    }
     return true;
   }
   if (command === "/mute") {
