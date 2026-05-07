@@ -48,14 +48,28 @@ function findOnPath(command) {
   return undefined;
 }
 
-function partyPrompt(label, message) {
+function formatHistory(history = []) {
+  if (!Array.isArray(history) || history.length === 0) {
+    return "No prior visible messages.";
+  }
+
+  return history
+    .map((item) => `${item.author}: ${item.text}`)
+    .join("\n");
+}
+
+function partyPrompt(label, message, history) {
   return `You are ${label} inside ctxparty, a short terminal group chat with User, Codex, and Claude.
 
 Rules:
 - Reply in 1-2 short sentences.
 - If responding to another assistant, address their point directly.
+- Use the conversation history below as shared context. If User asks what another participant said, answer from that history.
 - Use tools when needed to inspect the repository or answer accurately.
 - If you have nothing useful to add, reply exactly: .....
+
+Conversation so far:
+${formatHistory(history)}
 
 Incoming message:
 ${message.author}: ${message.text}`;
@@ -197,7 +211,7 @@ class BaseCliAgent {
     };
 
     try {
-      const text = await this.complete(partyPrompt(this.label, message), context);
+      const text = await this.complete(partyPrompt(this.label, message, context.history), context);
       if (context.signal?.aborted) return;
       if (!text || text === ".....") {
         yield {

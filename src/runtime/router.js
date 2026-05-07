@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { appendEvent } from "./transcript.js";
+import { appendEvent, readEvents, visibleHistoryFromEvents } from "./transcript.js";
+
+const MAX_AGENT_CONTEXT_MESSAGES = 24;
 
 function now() {
   return new Date().toISOString();
@@ -23,6 +25,15 @@ function unique(values) {
   return Array.from(new Set(values));
 }
 
+function historyItemFromMessage(message) {
+  return {
+    author: message.author,
+    text: message.text,
+    color: message.color,
+    ...(message.participantId ? { participantId: message.participantId } : {}),
+  };
+}
+
 export class PartyRouter {
   constructor({ participants, workspace, maxTurns, onEvent }) {
     this.participants = participants;
@@ -31,7 +42,9 @@ export class PartyRouter {
     this.onEvent = onEvent;
     this.muted = new Set();
     this.closed = false;
+    this.routing = false;
     this.abortController = new AbortController();
+    this.history = visibleHistoryFromEvents(readEvents(this.workspace.sessionLogPath));
 
     appendEvent(this.workspace, {
       type: this.workspace.resumed ? "session_resumed" : "session_started",
@@ -109,6 +122,7 @@ export class PartyRouter {
   }
 
   markSessionResumed(sessionLogPath) {
+    this.history = visibleHistoryFromEvents(readEvents(sessionLogPath));
     appendEvent(this.workspace, {
       type: "session_resumed",
       timestamp: now(),
@@ -122,6 +136,16 @@ export class PartyRouter {
 
   async submitUserMessage(text) {
     if (this.closed) return;
+    if (this.routing) {
+      this.emit({
+        type: "status",
+        text: "A message is already being routed. Press Esc to interrupt it first.",
+      });
+      return;
+    }
+    if (this.abortController.signal.aborted) {
+      this.abortController = new AbortController();
+    }
 
     const { targetParticipantIds, unknownMentions } = this.resolveMentions(text);
     for (const mention of unknownMentions) {
@@ -150,7 +174,16 @@ export class PartyRouter {
     });
     this.emit(message);
     appendEvent(this.workspace, message);
-    await this.route([message]);
+    this.history.push(historyItemFromMessage(message));
+    this.routing = true;
+    try {
+      await this.route([message]);
+    } finally {
+      this.routing = false;
+      if (!this.closed && this.abortController.signal.aborted) {
+        this.abortController = new AbortController();
+      }
+    }
   }
 
   async route(initialQueue) {
@@ -207,6 +240,7 @@ export class PartyRouter {
         for await (const event of participant.send(message, {
           workspace: this.workspace,
           signal: this.abortController.signal,
+          history: this.recentHistory(),
         })) {
           if (this.closed || this.abortController.signal.aborted) return;
 
@@ -219,6 +253,7 @@ export class PartyRouter {
             });
             this.emit(reply);
             appendEvent(this.workspace, reply);
+            this.history.push(historyItemFromMessage(reply));
             if (!message.directOnly) {
               queue.push(reply);
             }
@@ -251,6 +286,25 @@ export class PartyRouter {
 
   emit(event) {
     this.onEvent?.(event);
+  }
+
+  recentHistory() {
+    return this.history.slice(-MAX_AGENT_CONTEXT_MESSAGES);
+  }
+
+  interrupt(reason = "user") {
+    if (this.closed || !this.routing || this.abortController.signal.aborted) return false;
+    this.abortController.abort();
+    this.emit({
+      type: "status",
+      text: "Interrupted. Agent thinking stopped.",
+    });
+    appendEvent(this.workspace, {
+      type: "router_interrupted",
+      reason,
+      timestamp: now(),
+    });
+    return true;
   }
 
   async dispose() {

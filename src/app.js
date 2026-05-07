@@ -230,6 +230,8 @@ class PiTuiScreen {
     this.statusContainer = new Container();
     this.activeLoader = undefined;
     this.activeResumeList = undefined;
+    this.isSubmitting = false;
+    this.onInterrupt = undefined;
     this.editor = new Editor(this.tui, tuiTheme, { paddingX: 1, autocompleteMaxVisible: 8 });
     this.editor.setAutocompleteProvider(new CtxpartyAutocompleteProvider());
     this.footer = new Text(this.footerText(), 1, 0);
@@ -253,6 +255,10 @@ class PiTuiScreen {
         this.handleCtrlC();
         return { consume: true };
       }
+      if (this.isInterruptKey(data) && this.isSubmitting) {
+        this.handleInterrupt();
+        return { consume: true };
+      }
       return undefined;
     });
 
@@ -261,21 +267,28 @@ class PiTuiScreen {
 
   headerText() {
     return `${palette.bold}${palette.green}${APP_TITLE}${palette.reset}  ${palette.dim}${this.workspace.display.projectRoot}${palette.reset}
-${palette.gray}Enter sends. Ctrl+Enter adds lines. Type /help for commands. Ctrl+C clears draft; exits when empty.${palette.reset}`;
+${palette.gray}Enter sends. Ctrl+Enter adds lines. Esc interrupts agents. Ctrl+C clears draft; exits when empty.${palette.reset}`;
+  }
+
+  isInterruptKey(data) {
+    return matchesKey(data, "escape") || matchesKey(data, "esc") || data?.toString?.("utf8") === "\x1b";
   }
 
   footerText() {
     return `${palette.white}workspace${palette.reset} ${palette.gray}${this.workspace.display.root}${palette.reset} ${palette.gray}|${palette.reset} ${palette.white}session${palette.reset} ${palette.gray}${this.workspace.display.sessionLogPath}${palette.reset}`;
   }
 
-  start(onSubmit) {
+  start(onSubmit, onInterrupt) {
+    this.onInterrupt = onInterrupt;
     this.editor.onSubmit = async (text) => {
       const trimmed = text.trim();
       if (!trimmed || this.closed) return;
       this.editor.disableSubmit = true;
+      this.isSubmitting = true;
       try {
         await onSubmit(trimmed);
       } finally {
+        this.isSubmitting = false;
         this.editor.disableSubmit = false;
         if (!this.closed) {
           this.tui.setFocus(this.editor);
@@ -304,6 +317,13 @@ ${palette.gray}Enter sends. Ctrl+Enter adds lines. Type /help for commands. Ctrl
 
     this.clearEditor();
     this.status("Draft cleared. Press Ctrl+C again to exit.");
+  }
+
+  handleInterrupt() {
+    if (this.onInterrupt?.()) {
+      return;
+    }
+    this.status("Nothing to interrupt.");
   }
 
   clearEditor() {
@@ -413,6 +433,7 @@ ${palette.gray}Enter sends. Ctrl+Enter adds lines. Type /help for commands. Ctrl
   }
 
   message(author, text, color = "green") {
+    this.setStatusComponent(undefined);
     const label = formatMessageLabel(author, color);
     this.addLine(`${label}\n${text}\n`);
     this.history.push({ author, text, color });
@@ -458,6 +479,7 @@ ${palette.gray}Enter sends. Ctrl+Enter adds lines. Type /help for commands. Ctrl
   }
 
   error(text) {
+    this.setStatusComponent(undefined);
     this.addLine(`${palette.red}${text}${palette.reset}`);
   }
 
@@ -626,16 +648,19 @@ export async function runCtxparty(options) {
       onEvent: (event) => screen.event(event),
     });
     screen.status(`Session log: ${workspace.display.sessionLogPath}`);
-    await screen.start(async (text) => {
-      if (text.startsWith("/")) {
-        const keepGoing = await handleCommand(text, router, screen);
-        if (!keepGoing) {
-          await screen.close();
+    await screen.start(
+      async (text) => {
+        if (text.startsWith("/")) {
+          const keepGoing = await handleCommand(text, router, screen);
+          if (!keepGoing) {
+            await screen.close();
+          }
+          return;
         }
-        return;
-      }
-      await router.submitUserMessage(text);
-    });
+        await router.submitUserMessage(text);
+      },
+      () => router.interrupt("escape_key"),
+    );
     await router.dispose();
     return;
   }
