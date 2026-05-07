@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 const MIN_NODE_VERSION = [18, 18, 1];
 
 function isSupportedNodeVersion(version) {
@@ -26,6 +26,8 @@ Options:
   --resume [session]     Resume latest session, or the named/path JSONL session.
   --max-turns <number>   Maximum routed messages per user submission. Default: 8.
   --agent-timeout-ms <n> Timeout per participant call. Default: 150000.
+  --permission-policy <p> ACPX permissions: approve-reads, approve-all, deny, or fail.
+                         Default: CTXPARTY_PERMISSION_POLICY or approve-reads.
   --no-color             Disable ANSI colors.
   --help                 Show this help.
   --version              Show version.
@@ -34,9 +36,11 @@ Interactive commands:
   /help                  Show commands.
   /agents                List participants.
   @codex / @claude       Mention a participant for a direct reply only.
-  @all                   Ask all participants once without follow-up routing.
+  message without @      Ask all participants once.
+  @all                   Ask all participants explicitly.
   /mute <participant>    Mute a participant.
   /unmute <participant>  Unmute a participant.
+  /permissions [policy]  Show or set ACPX permission policy.
   /workspace             Show workspace paths.
   /history               Replay visible message history.
   /resume [session]      Show resumable sessions, or resume one by number/name/path.
@@ -54,6 +58,7 @@ function parseArgs(argv) {
     participants: "real",
     resume: false,
     agentTimeoutMs: 150000,
+    permissionPolicy: process.env.CTXPARTY_PERMISSION_POLICY || "approve-reads",
   };
 
   const readValue = (index, flag) => {
@@ -105,6 +110,13 @@ function parseArgs(argv) {
         throw new Error("--agent-timeout-ms must be an integer >= 1000");
       }
       parsed.agentTimeoutMs = value;
+    } else if (arg === "--permission-policy") {
+      const value = readValue(index, arg);
+      index += 1;
+      if (!["approve-reads", "approve-all", "deny", "deny-all", "fail"].includes(value)) {
+        throw new Error('--permission-policy must be "approve-reads", "approve-all", "deny", or "fail"');
+      }
+      parsed.permissionPolicy = value;
     } else if (arg === "--max-turns") {
       const value = Number.parseInt(readValue(index, arg), 10);
       index += 1;
