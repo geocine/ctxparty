@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+e2e/browser-terminal/node_modules/
+vendor/**/node_modules/
+
+# Runtime workspaces and generated sessions
+__ctxparty__/
+.ctxparty-*/
+
+# Browser/PTY E2E output
+e2e/browser-terminal/artifacts/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and diagnostics
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Coverage and test caches
+coverage/
+.nyc_output/
+.cache/
+.pytest_cache/
+.gocache/
+
+# Build/editor/system noise
+ctxparty-*.tgz
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

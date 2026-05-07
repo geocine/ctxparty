@@ -1,0 +1,16 @@
+{
+  "name": "ctrl-c-empty-exit",
+  "timeoutMs": 15000,
+  "args": ["--cwd", ".ctxparty-e2e-ctrl-c-empty"],
+  "steps": [
+    {
+      "name": "initial",
+      "expect": ["Context Party", "exits when empty"]
+    },
+    {
+      "name": "empty-ctrl-c-exits",
+      "press": "Control+C",
+      "expectExit": true
+    }
+  ]
+}

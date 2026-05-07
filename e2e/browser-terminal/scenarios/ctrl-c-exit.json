@@ -1,0 +1,28 @@
+{
+  "name": "ctrl-c-exit",
+  "timeoutMs": 15000,
+  "args": ["--cwd", ".ctxparty-e2e-ctrl-c"],
+  "steps": [
+    {
+      "name": "initial",
+      "expect": ["Context Party", "exits when empty"]
+    },
+    {
+      "name": "type-draft",
+      "type": "draft before ctrl c",
+      "expect": ["draft before ctrl c"]
+    },
+    {
+      "name": "single-ctrl-c-clears",
+      "press": "Control+C",
+      "waitMs": 100,
+      "expectRunning": true,
+      "expect": ["Draft cleared. Press Ctrl+C again to exit."]
+    },
+    {
+      "name": "empty-after-clear-ctrl-c-exits",
+      "press": "Control+C",
+      "expectExit": true
+    }
+  ]
+}

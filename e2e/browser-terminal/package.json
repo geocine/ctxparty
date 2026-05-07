@@ -1,0 +1,14 @@
+{
+  "name": "ctxparty-browser-terminal-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node run-scenario.mjs"
+  },
+  "dependencies": {
+    "@wterm/dom": "^0.1.9",
+    "agent-browser": "^0.26.0",
+    "node-pty": "^1.0.0",
+    "playwright-core": "^1.59.1"
+  }
+}
