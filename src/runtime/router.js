@@ -25,6 +25,10 @@ function unique(values) {
   return Array.from(new Set(values));
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function historyItemFromMessage(message) {
   return {
     author: message.author,
@@ -32,6 +36,10 @@ function historyItemFromMessage(message) {
     color: message.color,
     ...(message.participantId ? { participantId: message.participantId } : {}),
   };
+}
+
+function withoutSelf(participantIds, participantId) {
+  return participantIds.filter((id) => id !== participantId);
 }
 
 export class PartyRouter {
@@ -62,15 +70,39 @@ export class PartyRouter {
       id: participant.id,
       label: participant.label,
       muted: this.muted.has(participant.id),
+      permissionPolicy: participant.getPermissionPolicy?.(),
     }));
   }
 
-  resolveMentions(text) {
+  setPermissionPolicy(policy) {
+    let changed = false;
+    for (const participant of this.participants) {
+      if (typeof participant.setPermissionPolicy === "function") {
+        participant.setPermissionPolicy(policy);
+        changed = true;
+      }
+    }
+    if (changed) {
+      appendEvent(this.workspace, {
+        type: "permission_policy_changed",
+        policy,
+        timestamp: now(),
+      });
+    }
+    return changed;
+  }
+
+  participantAliases() {
     const aliases = new Map();
     for (const participant of this.participants) {
       aliases.set(participant.id.toLowerCase(), participant.id);
       aliases.set(participant.label.toLowerCase(), participant.id);
     }
+    return aliases;
+  }
+
+  resolveMentions(text, options = {}) {
+    const aliases = this.participantAliases();
 
     const mentioned = [];
     const unknown = [];
@@ -88,6 +120,18 @@ export class PartyRouter {
         mentioned.push(participantId);
       } else {
         unknown.push(rawName);
+      }
+    }
+
+    if (options.includeParticipantCalls) {
+      for (const [alias, participantId] of aliases) {
+        const callPattern = new RegExp(
+          `(?:^|[\\n.!?]\\s*)(?:hey\\s+|hi\\s+|ok(?:ay)?[:,]?\\s+|sure[:,]?\\s+)?${escapeRegExp(alias)}\\b(?:\\s*[:,;]|\\s+[\\u2014-]\\s+)`,
+          "i",
+        );
+        if (callPattern.test(text)) {
+          mentioned.push(participantId);
+        }
       }
     }
 
@@ -165,12 +209,15 @@ export class PartyRouter {
       return;
     }
 
+    const participantTargets =
+      targetParticipantIds.length > 0 ? targetParticipantIds : this.participants.map((participant) => participant.id);
+
     const message = createMessage({
       author: "User",
       text,
       color: "green",
-      targetParticipantIds,
-      directOnly: targetParticipantIds.length > 0,
+      targetParticipantIds: participantTargets,
+      directOnly: true,
     });
     this.emit(message);
     appendEvent(this.workspace, message);
@@ -216,64 +263,11 @@ export class PartyRouter {
         timestamp: now(),
       });
 
-      let producedReply = false;
-      for (const participant of this.participants) {
-        if (this.closed || this.abortController.signal.aborted) return;
-        if (this.muted.has(participant.id)) continue;
-        if (message.participantId === participant.id) continue;
-        if (
-          message.author === "User" &&
-          Array.isArray(message.targetParticipantIds) &&
-          message.targetParticipantIds.length > 0 &&
-          !message.targetParticipantIds.includes(participant.id)
-        ) {
-          continue;
-        }
-
-        appendEvent(this.workspace, {
-          type: "agent_started",
-          participantId: participant.id,
-          messageId: message.id,
-          timestamp: now(),
-        });
-
-        for await (const event of participant.send(message, {
-          workspace: this.workspace,
-          signal: this.abortController.signal,
-          history: this.recentHistory(),
-        })) {
-          if (this.closed || this.abortController.signal.aborted) return;
-
-          if (event.type === "message") {
-            const reply = createMessage({
-              author: event.author,
-              participantId: event.participantId,
-              color: event.color,
-              text: event.text,
-            });
-            this.emit(reply);
-            appendEvent(this.workspace, reply);
-            this.history.push(historyItemFromMessage(reply));
-            if (!message.directOnly) {
-              queue.push(reply);
-            }
-            producedReply = true;
-          } else if (event.type === "silent") {
-            this.emit({ type: "status", text: event.text });
-            appendEvent(this.workspace, {
-              type: "agent_silent",
-              participantId: event.participantId,
-              timestamp: now(),
-            });
-          } else {
-            this.emit(event);
-            appendEvent(this.workspace, {
-              ...event,
-              timestamp: now(),
-            });
-          }
-        }
-      }
+      const targets = this.targetParticipantsForMessage(message);
+      const producedReply =
+        message.author === "User" && message.directOnly
+          ? (await Promise.all(targets.map((participant) => this.routeToParticipant(participant, message, queue)))).some(Boolean)
+          : (await this.routeToParticipantsSequentially(targets, message, queue));
 
       appendEvent(this.workspace, {
         type: "router_turn_finished",
@@ -288,6 +282,101 @@ export class PartyRouter {
     this.onEvent?.(event);
   }
 
+  targetParticipantsForMessage(message) {
+    return this.participants.filter((participant) => {
+      if (this.muted.has(participant.id)) return false;
+      if (message.participantId === participant.id) return false;
+      if (
+        Array.isArray(message.targetParticipantIds) &&
+        message.targetParticipantIds.length > 0 &&
+        !message.targetParticipantIds.includes(participant.id)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  async routeToParticipantsSequentially(participants, message, queue) {
+    let producedReply = false;
+    for (const participant of participants) {
+      if (this.closed || this.abortController.signal.aborted) return producedReply;
+      producedReply = (await this.routeToParticipant(participant, message, queue)) || producedReply;
+    }
+    return producedReply;
+  }
+
+  async routeToParticipant(participant, message, queue) {
+    if (this.closed || this.abortController.signal.aborted) return false;
+
+    const started = {
+      type: "agent_started",
+      participantId: participant.id,
+      label: participant.label,
+      messageId: message.id,
+      timestamp: now(),
+    };
+    this.emit(started);
+    appendEvent(this.workspace, started);
+
+    let producedReply = false;
+    try {
+      for await (const event of participant.send(message, {
+        workspace: this.workspace,
+        signal: this.abortController.signal,
+        history: this.recentHistory(),
+      })) {
+        if (this.closed || this.abortController.signal.aborted) return producedReply;
+
+        if (event.type === "message") {
+          const { targetParticipantIds } = this.resolveMentions(event.text, { includeParticipantCalls: true });
+          const followUpTargets = withoutSelf(targetParticipantIds, participant.id);
+          const reply = createMessage({
+            author: event.author,
+            participantId: event.participantId,
+            color: event.color,
+            text: event.text,
+            targetParticipantIds: followUpTargets,
+            directOnly: followUpTargets.length > 0,
+          });
+          this.emit(reply);
+          appendEvent(this.workspace, reply);
+          this.history.push(historyItemFromMessage(reply));
+          if (followUpTargets.length > 0 || !message.directOnly) {
+            queue.push(reply);
+          }
+          producedReply = true;
+        } else if (event.type === "message_delta" || event.type === "thought_delta") {
+          this.emit(event);
+        } else if (event.type === "silent") {
+          this.emit(event);
+          appendEvent(this.workspace, {
+            type: "agent_silent",
+            participantId: event.participantId,
+            timestamp: now(),
+          });
+        } else {
+          this.emit(event);
+          appendEvent(this.workspace, {
+            ...event,
+            timestamp: now(),
+          });
+        }
+      }
+    } finally {
+      const finished = {
+        type: "agent_finished",
+        participantId: participant.id,
+        label: participant.label,
+        messageId: message.id,
+        timestamp: now(),
+      };
+      this.emit(finished);
+      appendEvent(this.workspace, finished);
+    }
+    return producedReply;
+  }
+
   recentHistory() {
     return this.history.slice(-MAX_AGENT_CONTEXT_MESSAGES);
   }
@@ -297,7 +386,7 @@ export class PartyRouter {
     this.abortController.abort();
     this.emit({
       type: "status",
-      text: "Interrupted. Agent thinking stopped.",
+      text: "Interrupted. Agent stopped.",
     });
     appendEvent(this.workspace, {
       type: "router_interrupted",

@@ -9,6 +9,7 @@ export class MockAgent {
   async *send(message, context) {
     yield {
       type: "status",
+      participantId: this.id,
       text: `${this.label} thinking...`,
     };
 
