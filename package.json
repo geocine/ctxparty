@@ -1,6 +1,6 @@
 {
   "name": "ctxparty",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A terminal workspace for coordinating multiple coding agents in one shared project session.",
   "type": "module",
   "bin": {
