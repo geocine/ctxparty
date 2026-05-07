@@ -1,10 +1,11 @@
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { Container, Editor, Loader, ProcessTerminal, Spacer, Text, TUI, matchesKey } from "./pi-tui.js";
+import { Container, Editor, Loader, ProcessTerminal, SelectList, Spacer, Text, TUI, matchesKey } from "./pi-tui.js";
 import { ClaudeCliAgent, CodexCliAgent } from "./agents/cli-agents.js";
 import { MockAgent } from "./agents/mock-agent.js";
 import { PartyRouter } from "./runtime/router.js";
-import { createWorkspace } from "./runtime/workspace.js";
+import { readEvents, visibleHistoryFromEvents } from "./runtime/transcript.js";
+import { createWorkspace, listWorkspaceSessions, resolveWorkspaceSession, setWorkspaceSession } from "./runtime/workspace.js";
 import { CtxpartyAutocompleteProvider } from "./tui/autocomplete.js";
 
 const palette = {
@@ -68,11 +69,71 @@ function createParticipants(options = {}) {
   ];
 }
 
+function formatSessionModified(date) {
+  return date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "Z");
+}
+
+function getSessionSummaries(workspace) {
+  return listWorkspaceSessions(workspace)
+    .map((session) => {
+      const events = readEvents(session.path);
+      const history = visibleHistoryFromEvents(events);
+      const lastMessage = history.at(-1);
+      return {
+        ...session,
+        messageCount: history.length,
+        description: `${formatSessionModified(session.modified)} | ${history.length} messages${
+          lastMessage ? ` | ${lastMessage.author}: ${lastMessage.text.replace(/\s+/g, " ").slice(0, 80)}` : ""
+        }${session.active ? " | active" : ""}`,
+      };
+    })
+    .filter((session) => session.messageCount > 0)
+    .map((session, index) => ({ ...session, index: index + 1 }));
+}
+
+function historyForSession(sessionPath) {
+  return visibleHistoryFromEvents(readEvents(sessionPath));
+}
+
+function sessionListText(sessions) {
+  if (sessions.length === 0) return "No ctxparty sessions found.";
+  return sessions
+    .map((session) => {
+      const active = session.active ? " *" : "";
+      return `${session.index}. ${session.name}${active}\n   ${session.description}`;
+    })
+    .join("\n");
+}
+
+async function resumeSession(router, screen, sessionPath) {
+  setWorkspaceSession(router.workspace, sessionPath);
+  const history = historyForSession(sessionPath);
+  router.markSessionResumed(sessionPath);
+  screen.replaceHistory(history);
+  screen.status(`Resumed ${history.length} visible messages from ${router.workspace.display.sessionLogPath}`);
+}
+
+function resolveResumeCommandSession(workspace, sessions, arg) {
+  const trimmed = arg.trim();
+  if (trimmed === "latest") {
+    const latest = sessions[0];
+    if (!latest) throw new Error("No ctxparty sessions found.");
+    return latest.path;
+  }
+
+  const index = Number.parseInt(trimmed, 10);
+  if (String(index) === trimmed && index >= 1 && index <= sessions.length) {
+    return sessions[index - 1].path;
+  }
+
+  return resolveWorkspaceSession(workspace, trimmed);
+}
+
 class ConsoleScreen {
-  constructor({ color, workspace }) {
+  constructor({ color, workspace, initialHistory = [] }) {
     this.color = color;
     this.workspace = workspace;
-    this.history = [];
+    this.history = [...initialHistory];
   }
 
   header() {
@@ -127,6 +188,25 @@ class ConsoleScreen {
     }
   }
 
+  showResumedHistory() {
+    if (this.history.length === 0) return;
+    this.status(`Resumed ${this.history.length} visible messages from ${this.workspace.display.resumedSessionLogPath}`);
+    this.replayHistory();
+  }
+
+  replaceHistory(history) {
+    this.history = [...history];
+    this.clear();
+    this.replayHistory();
+  }
+
+  showSessionList(sessions) {
+    this.info(sessionListText(sessions));
+    if (sessions.length > 0) {
+      this.status("Use /resume <number>, /resume latest, or /resume <session file>.");
+    }
+  }
+
   workspaceInfo() {
     console.log(`project:   ${this.workspace.display.projectRoot}`);
     console.log(`workspace: ${this.workspace.display.root}`);
@@ -136,9 +216,9 @@ class ConsoleScreen {
 }
 
 class PiTuiScreen {
-  constructor({ workspace }) {
+  constructor({ workspace, initialHistory = [] }) {
     this.workspace = workspace;
-    this.history = [];
+    this.history = [...initialHistory];
     this.resolveClose = undefined;
     this.closed = false;
     this.closePromise = undefined;
@@ -149,6 +229,7 @@ class PiTuiScreen {
     this.chat = new Container();
     this.statusContainer = new Container();
     this.activeLoader = undefined;
+    this.activeResumeList = undefined;
     this.editor = new Editor(this.tui, tuiTheme, { paddingX: 1, autocompleteMaxVisible: 8 });
     this.editor.setAutocompleteProvider(new CtxpartyAutocompleteProvider());
     this.footer = new Text(this.footerText(), 1, 0);
@@ -163,12 +244,19 @@ class PiTuiScreen {
     this.tui.setFocus(this.editor);
 
     this.tui.addInputListener((data) => {
+      if (this.activeResumeList) {
+        this.activeResumeList.handleInput(data);
+        this.tui.requestRender();
+        return { consume: true };
+      }
       if (matchesKey(data, "ctrl+c")) {
         this.handleCtrlC();
         return { consume: true };
       }
       return undefined;
     });
+
+    this.showResumedHistory();
   }
 
   headerText() {
@@ -259,6 +347,71 @@ ${palette.gray}Enter sends. Ctrl+Enter adds lines. Type /help for commands. Ctrl
     this.tui.requestRender();
   }
 
+  addHistoryLine(item) {
+    const label = formatMessageLabel(item.author, item.color);
+    this.addLine(`${label}\n${item.text}\n`);
+  }
+
+  replaceHistory(history) {
+    this.history = [...history];
+    this.chat.clear();
+    for (const item of this.history) {
+      this.addHistoryLine(item);
+    }
+    this.tui.setFocus(this.editor);
+    this.tui.requestRender(true);
+  }
+
+  showSessionList(sessions) {
+    this.info(sessionListText(sessions));
+  }
+
+  showResumePicker(sessions, onSelect) {
+    if (sessions.length === 0) {
+      this.status("No ctxparty sessions found.");
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      const items = sessions.map((session) => ({
+        value: String(session.index),
+        label: `${session.index}. ${session.name}${session.active ? " *" : ""}`,
+        description: session.description,
+      }));
+      const list = new SelectList(items, 8, tuiTheme.selectList, {
+        minPrimaryColumnWidth: 28,
+        maxPrimaryColumnWidth: 42,
+      });
+      const container = new Container();
+      container.addChild(new Text(`${palette.gray}Select a session to resume. Enter selects, Esc cancels.${palette.reset}`, 1, 0));
+      container.addChild(list);
+
+      const closePicker = () => {
+        this.activeResumeList = undefined;
+        this.setStatusComponent(undefined);
+        this.tui.setFocus(this.editor);
+        this.tui.requestRender(true);
+      };
+
+      list.onSelect = async (item) => {
+        const session = sessions[Number.parseInt(item.value, 10) - 1];
+        closePicker();
+        if (session) {
+          await onSelect(session);
+        }
+        resolve();
+      };
+      list.onCancel = () => {
+        closePicker();
+        this.status("Resume cancelled.");
+        resolve();
+      };
+
+      this.activeResumeList = list;
+      this.setStatusComponent(container);
+    });
+  }
+
   message(author, text, color = "green") {
     const label = formatMessageLabel(author, color);
     this.addLine(`${label}\n${text}\n`);
@@ -316,8 +469,21 @@ ${palette.gray}Enter sends. Ctrl+Enter adds lines. Type /help for commands. Ctrl
 
   replayHistory() {
     for (const item of this.history) {
-      const label = formatMessageLabel(item.author, item.color);
-      this.addLine(`${label}\n${item.text}\n`);
+      this.addHistoryLine(item);
+    }
+  }
+
+  showResumedHistory() {
+    if (this.history.length === 0) return;
+    this.setStatusComponent(
+      new Text(
+        `${palette.gray}Resumed ${this.history.length} visible messages from ${this.workspace.display.resumedSessionLogPath}${palette.reset}`,
+        1,
+        0,
+      ),
+    );
+    for (const item of this.history) {
+      this.addHistoryLine(item);
     }
   }
 
@@ -343,6 +509,7 @@ function commandHelp() {
     "/unmute <participant>  Unmute a participant.",
     "/workspace             Show workspace paths.",
     "/history               Replay visible message history.",
+    "/resume [session]      Show resumable sessions, or resume one by number/name/path.",
     "/clear                 Clear the screen.",
     "/quit                  Exit.",
   ].join("\n");
@@ -399,6 +566,26 @@ async function handleCommand(inputText, router, screen) {
     screen.replayHistory();
     return true;
   }
+  if (command === "/resume") {
+    const sessions = getSessionSummaries(router.workspace);
+    if (!arg.trim()) {
+      if (typeof screen.showResumePicker === "function") {
+        await screen.showResumePicker(sessions, async (session) => {
+          await resumeSession(router, screen, session.path);
+        });
+      } else {
+        screen.showSessionList(sessions);
+      }
+      return true;
+    }
+
+    try {
+      await resumeSession(router, screen, resolveResumeCommandSession(router.workspace, sessions, arg));
+    } catch (error) {
+      screen.error(error instanceof Error ? error.message : String(error));
+    }
+    return true;
+  }
   if (command === "/clear") {
     screen.clear();
     return true;
@@ -412,9 +599,10 @@ async function handleCommand(inputText, router, screen) {
 }
 
 export async function runCtxparty(options) {
-  const workspace = createWorkspace(options.cwd);
+  const workspace = createWorkspace(options.cwd, { resume: options.resume });
+  const initialHistory = workspace.resumed ? visibleHistoryFromEvents(readEvents(workspace.sessionLogPath)) : [];
   if (options.once) {
-    const screen = new ConsoleScreen({ color: options.color, workspace });
+    const screen = new ConsoleScreen({ color: options.color, workspace, initialHistory });
     const router = new PartyRouter({
       participants: createParticipants(options),
       workspace,
@@ -422,6 +610,7 @@ export async function runCtxparty(options) {
       onEvent: (event) => screen.event(event),
     });
     screen.header();
+    screen.showResumedHistory();
     screen.status(`Session log: ${workspace.display.sessionLogPath}`);
     await router.submitUserMessage(options.once);
     await router.dispose();
@@ -429,7 +618,7 @@ export async function runCtxparty(options) {
   }
 
   if (input.isTTY) {
-    const screen = new PiTuiScreen({ workspace });
+    const screen = new PiTuiScreen({ workspace, initialHistory });
     const router = new PartyRouter({
       participants: createParticipants(options),
       workspace,
@@ -451,7 +640,7 @@ export async function runCtxparty(options) {
     return;
   }
 
-  const screen = new ConsoleScreen({ color: options.color, workspace });
+  const screen = new ConsoleScreen({ color: options.color, workspace, initialHistory });
   const router = new PartyRouter({
     participants: createParticipants(options),
     workspace,
@@ -459,6 +648,7 @@ export async function runCtxparty(options) {
     onEvent: (event) => screen.event(event),
   });
   screen.header();
+  screen.showResumedHistory();
   screen.status(`Session log: ${workspace.display.sessionLogPath}`);
 
   const rl = readline.createInterface({ input, output });

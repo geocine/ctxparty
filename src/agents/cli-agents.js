@@ -5,9 +5,47 @@ import path from "node:path";
 const DEFAULT_TIMEOUT_MS = 150000;
 
 function defaultWindowsCodexJs() {
-  const userProfile = process.env.USERPROFILE;
-  if (!userProfile) return undefined;
-  return path.join(userProfile, "nodejs", "node_modules", "@openai", "codex", "bin", "codex.js");
+  const candidates = [];
+  if (process.env.APPDATA) {
+    candidates.push(path.join(process.env.APPDATA, "npm", "node_modules", "@openai", "codex", "bin", "codex.js"));
+  }
+  if (process.env.USERPROFILE) {
+    candidates.push(
+      path.join(process.env.USERPROFILE, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex", "bin", "codex.js"),
+      path.join(process.env.USERPROFILE, "nodejs", "node_modules", "@openai", "codex", "bin", "codex.js"),
+    );
+  }
+  const codexShim = findOnPath("codex");
+  if (codexShim) {
+    candidates.push(path.join(path.dirname(codexShim), "node_modules", "@openai", "codex", "bin", "codex.js"));
+  }
+  return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
+function pathEntries() {
+  return (process.env.PATH ?? "")
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function commandCandidates(command) {
+  if (process.platform !== "win32" || path.extname(command)) return [command];
+  const pathExt = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((extension) => extension.trim().toLowerCase())
+    .filter(Boolean);
+  return [command, ...pathExt.map((extension) => `${command}${extension}`)];
+}
+
+function findOnPath(command) {
+  for (const entry of pathEntries()) {
+    for (const candidate of commandCandidates(command)) {
+      const fullPath = path.join(entry, candidate);
+      if (fs.existsSync(fullPath)) return fullPath;
+    }
+  }
+  return undefined;
 }
 
 function partyPrompt(label, message) {
@@ -16,7 +54,7 @@ function partyPrompt(label, message) {
 Rules:
 - Reply in 1-2 short sentences.
 - If responding to another assistant, address their point directly.
-- Do not use tools.
+- Use tools when needed to inspect the repository or answer accurately.
 - If you have nothing useful to add, reply exactly: .....
 
 Incoming message:
@@ -228,37 +266,36 @@ export class ClaudeCliAgent extends BaseCliAgent {
   }
 
   commandSummary() {
-    return "claude -p --bare --tools \"\" --no-session-persistence --model qwen36-27b --output-format=json";
+    return "claude -p --bare --tools default --no-session-persistence --output-format=json";
   }
 
   claudeEnv() {
-    const requiredToken = process.env.ANTHROPIC_AUTH_TOKEN;
-    if (!requiredToken) {
-      throw new Error("ANTHROPIC_AUTH_TOKEN is required for the Claude CLI adapter");
+    const awsProfile = process.env.AWS_PROFILE?.trim();
+    if (!awsProfile) {
+      throw new Error("AWS_PROFILE is required for the Claude CLI adapter");
     }
     return {
-      ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? "http://136.61.33.107:42950",
-      ANTHROPIC_AUTH_TOKEN: requiredToken,
-      ANTHROPIC_DEFAULT_OPUS_MODEL: process.env.ANTHROPIC_DEFAULT_OPUS_MODEL ?? "qwen36-27b",
-      ANTHROPIC_DEFAULT_SONNET_MODEL: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL ?? "qwen36-27b",
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL ?? "qwen36-27b",
+      AWS_PROFILE: awsProfile,
     };
   }
 
   async complete(prompt, context) {
+    const args = [
+      "-p",
+      "--bare",
+      "--tools",
+      "default",
+      "--no-session-persistence",
+      "--output-format=json",
+    ];
+    if (process.env.CTXPARTY_CLAUDE_MODEL?.trim()) {
+      args.push("--model", process.env.CTXPARTY_CLAUDE_MODEL.trim());
+    }
+    args.push(prompt);
+
     const { stdout } = await runProcess({
       command: "claude",
-      args: [
-        "-p",
-        "--bare",
-        "--tools",
-        "",
-        "--no-session-persistence",
-        "--model",
-        "qwen36-27b",
-        "--output-format=json",
-        prompt,
-      ],
+      args,
       cwd: context.workspace.projectRoot,
       env: this.claudeEnv(),
       timeoutMs: this.timeoutMs,

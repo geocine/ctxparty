@@ -1,5 +1,16 @@
 #!/usr/bin/env node
 const VERSION = "0.1.0";
+const MIN_NODE_VERSION = [18, 18, 1];
+
+function isSupportedNodeVersion(version) {
+  const [major = 0, minor = 0, patch = 0] = version.split(".").map((part) => Number.parseInt(part, 10));
+  const actual = [major, minor, patch];
+  for (let index = 0; index < MIN_NODE_VERSION.length; index += 1) {
+    if (actual[index] > MIN_NODE_VERSION[index]) return true;
+    if (actual[index] < MIN_NODE_VERSION[index]) return false;
+  }
+  return true;
+}
 
 function printHelp() {
   console.log(`Context Party ${VERSION}
@@ -10,8 +21,9 @@ Usage:
 Options:
   --once <message>       Run one party turn and exit.
   --demo-real            Run a short real Codex/Claude exchange and exit.
-  --participants <mode>  Participant adapters: "mock" or "real". Default: mock.
+  --participants <mode>  Participant adapters: "real" or "mock". Default: real.
   --cwd <path>           Project directory where __ctxparty__/ is created.
+  --resume [session]     Resume latest session, or the named/path JSONL session.
   --max-turns <number>   Maximum routed messages per user submission. Default: 8.
   --agent-timeout-ms <n> Timeout per participant call. Default: 150000.
   --no-color             Disable ANSI colors.
@@ -27,6 +39,7 @@ Interactive commands:
   /unmute <participant>  Unmute a participant.
   /workspace             Show workspace paths.
   /history               Replay visible message history.
+  /resume [session]      Show resumable sessions, or resume one by number/name/path.
   /clear                 Clear the screen.
   /quit                  Exit.
 `);
@@ -38,7 +51,8 @@ function parseArgs(argv) {
     maxTurns: 8,
     color: true,
     once: undefined,
-    participants: "mock",
+    participants: "real",
+    resume: false,
     agentTimeoutMs: 150000,
   };
 
@@ -76,6 +90,14 @@ function parseArgs(argv) {
     } else if (arg === "--cwd") {
       parsed.cwd = readValue(index, arg);
       index += 1;
+    } else if (arg === "--resume") {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("--")) {
+        parsed.resume = true;
+      } else {
+        parsed.resume = value;
+        index += 1;
+      }
     } else if (arg === "--agent-timeout-ms") {
       const value = Number.parseInt(readValue(index, arg), 10);
       index += 1;
@@ -100,6 +122,9 @@ function parseArgs(argv) {
 
 async function main() {
   try {
+    if (!isSupportedNodeVersion(process.versions.node)) {
+      throw new Error(`Node.js >=${MIN_NODE_VERSION.join(".")} is required; current Node.js is ${process.versions.node}`);
+    }
     const options = parseArgs(process.argv.slice(2));
     if (options.help) {
       printHelp();

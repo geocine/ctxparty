@@ -34,8 +34,9 @@ export class PartyRouter {
     this.abortController = new AbortController();
 
     appendEvent(this.workspace, {
-      type: "session_started",
+      type: this.workspace.resumed ? "session_resumed" : "session_started",
       timestamp: now(),
+      ...(this.workspace.resumedSessionLogPath ? { resumedSessionLogPath: this.workspace.resumedSessionLogPath } : {}),
       participants: this.participants.map((participant) => ({
         id: participant.id,
         label: participant.label,
@@ -105,6 +106,18 @@ export class PartyRouter {
       timestamp: now(),
     });
     return true;
+  }
+
+  markSessionResumed(sessionLogPath) {
+    appendEvent(this.workspace, {
+      type: "session_resumed",
+      timestamp: now(),
+      resumedSessionLogPath: sessionLogPath,
+      participants: this.participants.map((participant) => ({
+        id: participant.id,
+        label: participant.label,
+      })),
+    });
   }
 
   async submitUserMessage(text) {

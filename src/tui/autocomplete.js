@@ -5,6 +5,7 @@ const slashCommands = [
   { value: "unmute", label: "unmute", description: "Unmute a participant", suffix: " " },
   { value: "workspace", label: "workspace", description: "Show workspace paths" },
   { value: "history", label: "history", description: "Replay visible message history" },
+  { value: "resume", label: "resume", description: "Show resumable sessions", suffix: " " },
   { value: "clear", label: "clear", description: "Clear the screen" },
   { value: "quit", label: "quit", description: "Exit" },
 ];
