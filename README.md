@@ -8,7 +8,7 @@ It uses Pi's `@mariozechner/pi-tui` package for the interactive terminal UI, whi
 - writes `context.md`, `files/`, `logs/`, and structured JSONL sessions;
 - starts an interactive terminal session;
 - routes user messages through real CLI-backed `Codex` and `Claude` participants by default;
-- supports bounded participant-to-participant routing;
+- sends unmentioned user messages to all participants once, and sends `@` mentions only to the requested participant(s);
 - supports core slash commands.
 
 Chat colors are intentionally simple: User and the title are green, Codex is blue, Claude is orange, and status/editor chrome is gray.
@@ -90,9 +90,11 @@ npm run smoke
 
 - `/help`
 - `/agents`
-- `@codex`, `@claude`, or `@all` in a message to request direct replies without follow-up routing
+- message without `@` to ask all participants once
+- `@codex`, `@claude`, or `@all` in a message to request direct replies only
 - `/mute <participant>`
 - `/unmute <participant>`
+- `/permissions` to select the ACPX permission policy; `/permissions approve-all` to let agents proceed without prompts
 - `/workspace`
 - `/history`
 - `/resume` to show resumable sessions; `/resume <number|name|path>` to switch sessions
@@ -101,8 +103,8 @@ npm run smoke
 
 ## Current Boundary
 
-The visible assistant is a **Participant**. The implementation behind it is an **Agent Adapter**. By default, ctxparty uses real CLI adapters for Codex and Claude with repository inspection tools enabled. Those CLIs must be installed, on `PATH`, and authenticated. The Claude adapter expects Bedrock-backed auth through `AWS_PROFILE` and uses the Claude CLI's configured default model unless `CTXPARTY_CLAUDE_MODEL` is set. Mock adapters remain available with `--participants mock` for local smoke testing without external subscriptions.
+The visible assistant is a **Participant**. The implementation behind it is an **Agent Adapter**. By default, ctxparty uses `acpx` as the real agent backend for Codex and Claude, so agent traffic uses ACP sessions, structured streaming updates, queue-aware prompts, and cooperative cancellation instead of raw terminal scraping. ctxparty installs `acpx` as an optional dependency on Node versions that support it, and also falls back to an existing global `acpx` binary when present. Set `CTXPARTY_AGENT_BACKEND=raw` to use the legacy direct Codex/Claude CLI adapters. Mock adapters remain available with `--participants mock` for local smoke testing without external subscriptions.
 
 The Pi TUI bridge lives in `src/pi-tui.js`; the rest of the app imports from that bridge rather than importing `@mariozechner/pi-tui` directly.
 
-Real adapters live in `src/agents/cli-agents.js`. Codex runs through `codex exec --json`; Claude runs through lean print mode with `--bare`, default tools, no session persistence, and JSON output.
+Real adapters live in `src/agents/cli-agents.js`. The acpx backend runs `acpx --format json --json-strict <agent> prompt -s <ctxparty-session> --file -` and streams ACP `agent_thought_chunk`, `tool_call`, and `agent_message_chunk` updates into the ctxparty UI. Some ACP adapters do not emit visible thought chunks for every model; ctxparty displays them when ACPX sends them and otherwise shows live elapsed progress while waiting for first output. ACPX sessions are scoped per project by default so agent backends can stay warm across ctxparty restarts. Set `CTXPARTY_ACPX_SESSION_SCOPE=session` to isolate ACPX sessions per ctxparty transcript, or `CTXPARTY_ACPX_SESSION_SCOPE=global` to use one global session name per agent. Set `CTXPARTY_PERMISSION_POLICY=approve-all` or start with `--permission-policy approve-all` when you trust the workspace and want ACPX permission requests approved automatically; the default is `approve-reads`. The raw fallback runs Codex through `codex exec --json` and Claude through lean print mode with `--bare`, default tools, no session persistence, and JSON output.
