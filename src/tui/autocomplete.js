@@ -3,6 +3,7 @@ const slashCommands = [
   { value: "agents", label: "agents", description: "List participants" },
   { value: "mute", label: "mute", description: "Mute a participant", suffix: " " },
   { value: "unmute", label: "unmute", description: "Unmute a participant", suffix: " " },
+  { value: "permissions", label: "permissions", description: "Set ACPX permission policy", suffix: " " },
   { value: "workspace", label: "workspace", description: "Show workspace paths" },
   { value: "history", label: "history", description: "Replay visible message history" },
   { value: "resume", label: "resume", description: "Show resumable sessions", suffix: " " },

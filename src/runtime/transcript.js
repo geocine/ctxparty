@@ -23,10 +23,21 @@ export function readEvents(sessionLogPath) {
 
 export function visibleHistoryFromEvents(events) {
   return events
-    .filter((event) => event.type === "message" && typeof event.author === "string" && typeof event.text === "string")
-    .map((event) => ({
-      author: event.author,
-      text: event.text,
-      color: event.color,
-    }));
+    .flatMap((event) => {
+      if (event.type === "message" && typeof event.author === "string" && typeof event.text === "string") {
+        return [{
+          author: event.author,
+          text: event.text,
+          color: event.color,
+        }];
+      }
+      if (event.type === "error" && typeof event.text === "string") {
+        return [{
+          author: "ctxparty",
+          text: event.text,
+          color: "red",
+        }];
+      }
+      return [];
+    });
 }

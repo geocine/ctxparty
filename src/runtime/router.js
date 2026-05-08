@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendEvent, readEvents, visibleHistoryFromEvents } from "./transcript.js";
+import { setWorkspacePermissionPolicy } from "./workspace.js";
 
 const MAX_AGENT_CONTEXT_MESSAGES = 24;
 
@@ -83,6 +84,7 @@ export class PartyRouter {
       }
     }
     if (changed) {
+      setWorkspacePermissionPolicy(this.workspace, policy);
       appendEvent(this.workspace, {
         type: "permission_policy_changed",
         policy,
@@ -320,6 +322,21 @@ export class PartyRouter {
     appendEvent(this.workspace, started);
 
     let producedReply = false;
+    let streamedReply;
+    const flushStreamedReply = () => {
+      if (producedReply || !streamedReply?.text?.trim()) return false;
+      const reply = createMessage({
+        author: streamedReply.author,
+        participantId: streamedReply.participantId,
+        color: streamedReply.color,
+        text: streamedReply.text,
+      });
+      this.emit(reply);
+      appendEvent(this.workspace, reply);
+      this.history.push(historyItemFromMessage(reply));
+      producedReply = true;
+      return true;
+    };
     try {
       for await (const event of participant.send(message, {
         workspace: this.workspace,
@@ -346,7 +363,16 @@ export class PartyRouter {
             queue.push(reply);
           }
           producedReply = true;
+          streamedReply = undefined;
         } else if (event.type === "message_delta" || event.type === "thought_delta") {
+          if (event.type === "message_delta") {
+            streamedReply = {
+              author: event.author,
+              participantId: event.participantId,
+              color: event.color,
+              text: event.accumulatedText ?? event.text,
+            };
+          }
           this.emit(event);
         } else if (event.type === "silent") {
           this.emit(event);
@@ -356,6 +382,9 @@ export class PartyRouter {
             timestamp: now(),
           });
         } else {
+          if (event.type === "error") {
+            flushStreamedReply();
+          }
           this.emit(event);
           appendEvent(this.workspace, {
             ...event,
@@ -363,6 +392,7 @@ export class PartyRouter {
           });
         }
       }
+      flushStreamedReply();
     } finally {
       const finished = {
         type: "agent_finished",

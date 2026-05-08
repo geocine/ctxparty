@@ -9,6 +9,16 @@ function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
+function readJsonObject(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 function isFile(target) {
   try {
     return fs.statSync(target).isFile();
@@ -123,6 +133,23 @@ export function setWorkspaceSession(workspace, sessionLogPath) {
   workspace.display.resumedSessionLogPath = workspace.display.sessionLogPath;
 }
 
+export function readWorkspaceSettings(workspace) {
+  return readJsonObject(workspace.settingsPath);
+}
+
+export function writeWorkspaceSettings(workspace, settings) {
+  const nextSettings = settings && typeof settings === "object" && !Array.isArray(settings) ? settings : {};
+  fs.writeFileSync(workspace.settingsPath, `${JSON.stringify(nextSettings, null, 2)}\n`, "utf8");
+  workspace.settings = nextSettings;
+}
+
+export function setWorkspacePermissionPolicy(workspace, permissionPolicy) {
+  writeWorkspaceSettings(workspace, {
+    ...readWorkspaceSettings(workspace),
+    permissionPolicy,
+  });
+}
+
 export function createWorkspace(cwd, options = {}) {
   const projectRoot = path.resolve(cwd);
   const launchRoot = process.cwd();
@@ -132,6 +159,7 @@ export function createWorkspace(cwd, options = {}) {
   const filesDir = path.join(root, "files");
   const sessionsDir = path.join(root, "sessions");
   const logsDir = path.join(root, "logs");
+  const settingsPath = path.join(root, "settings.json");
   ensureDir(filesDir);
   ensureDir(sessionsDir);
   ensureDir(logsDir);
@@ -155,6 +183,7 @@ Save larger artifacts in ./files/.
   const stamp = timestamp();
   const sessionLogPath = resumedSessionLogPath ?? path.join(sessionsDir, `${stamp}.jsonl`);
   const debugLogPath = path.join(logsDir, `${stamp}.log`);
+  const settings = readJsonObject(settingsPath);
   fs.writeFileSync(
     debugLogPath,
     resumedSessionLogPath
@@ -170,6 +199,7 @@ Save larger artifacts in ./files/.
     sessionsDir: toDisplayPath(sessionsDir, projectRoot),
     logsDir: toDisplayPath(logsDir, projectRoot),
     contextPath: toDisplayPath(contextPath, projectRoot),
+    settingsPath: toDisplayPath(settingsPath, projectRoot),
     sessionLogPath: toDisplayPath(sessionLogPath, projectRoot),
     debugLogPath: toDisplayPath(debugLogPath, projectRoot),
     resumedSessionLogPath: resumedSessionLogPath ? toDisplayPath(resumedSessionLogPath, projectRoot) : undefined,
@@ -182,10 +212,12 @@ Save larger artifacts in ./files/.
     sessionsDir,
     logsDir,
     contextPath,
+    settingsPath,
     sessionLogPath,
     resumedSessionLogPath,
     debugLogPath,
     resumed: Boolean(resumedSessionLogPath),
+    settings,
     display,
   };
 }

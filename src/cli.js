@@ -59,6 +59,7 @@ function parseArgs(argv) {
     resume: false,
     agentTimeoutMs: 150000,
     permissionPolicy: process.env.CTXPARTY_PERMISSION_POLICY || "approve-reads",
+    permissionPolicySource: process.env.CTXPARTY_PERMISSION_POLICY ? "env" : "default",
   };
 
   const readValue = (index, flag) => {
@@ -117,6 +118,7 @@ function parseArgs(argv) {
         throw new Error('--permission-policy must be "approve-reads", "approve-all", "deny", or "fail"');
       }
       parsed.permissionPolicy = value;
+      parsed.permissionPolicySource = "cli";
     } else if (arg === "--max-turns") {
       const value = Number.parseInt(readValue(index, arg), 10);
       index += 1;

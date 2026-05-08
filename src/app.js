@@ -6,6 +6,8 @@ import {
   ClaudeCliAgent,
   CodexAcpxAgent,
   CodexCliAgent,
+  acpxInstallHint,
+  isAcpxAvailable,
   normalizeAgentPermissionPolicy,
 } from "./agents/cli-agents.js";
 import { MockAgent } from "./agents/mock-agent.js";
@@ -123,6 +125,10 @@ function createParticipants(options = {}) {
       stance: "design review",
     }),
   ];
+}
+
+function shouldWarnMissingAcpx(options) {
+  return options.participants === "real" && process.env.CTXPARTY_AGENT_BACKEND !== "raw" && !isAcpxAvailable();
 }
 
 function formatSessionModified(date) {
@@ -283,6 +289,8 @@ class ConsoleScreen {
   workspaceInfo() {
     console.log(`project:   ${this.workspace.display.projectRoot}`);
     console.log(`workspace: ${this.workspace.display.root}`);
+    console.log(`context:   ${this.workspace.display.contextPath}`);
+    console.log(`settings:  ${this.workspace.display.settingsPath}`);
     console.log(`session:   ${this.workspace.display.sessionLogPath}`);
     console.log(`log:       ${this.workspace.display.debugLogPath}`);
   }
@@ -876,6 +884,8 @@ ${palette.gray}Enter sends. Ctrl+Enter adds lines. Esc interrupts agents. Ctrl+C
       [
         `${palette.bold}project${palette.reset}:   ${this.workspace.display.projectRoot}`,
         `${palette.bold}workspace${palette.reset}: ${this.workspace.display.root}`,
+        `${palette.bold}context${palette.reset}:   ${this.workspace.display.contextPath}`,
+        `${palette.bold}settings${palette.reset}:  ${this.workspace.display.settingsPath}`,
         `${palette.bold}session${palette.reset}:   ${this.workspace.display.sessionLogPath}`,
         `${palette.bold}log${palette.reset}:       ${this.workspace.display.debugLogPath}`,
       ].join("\n"),
@@ -915,6 +925,14 @@ function permissionPolicyText(policy) {
   const normalized = normalizePermissionCommandValue(policy);
   const item = PERMISSION_POLICIES.find((entry) => entry.value === normalized);
   return item ? `${item.label} (${item.value})` : normalized;
+}
+
+function initialPermissionPolicy(options, workspace) {
+  if (options.permissionPolicySource === "cli" || options.permissionPolicySource === "env") {
+    return normalizePermissionCommandValue(options.permissionPolicy);
+  }
+  const persisted = workspace.settings?.permissionPolicy;
+  return normalizePermissionCommandValue(persisted || options.permissionPolicy);
 }
 
 async function handleCommand(inputText, router, screen) {
@@ -1032,11 +1050,15 @@ async function handleCommand(inputText, router, screen) {
 
 export async function runCtxparty(options) {
   const workspace = createWorkspace(options.cwd, { resume: options.resume });
+  const runtimeOptions = {
+    ...options,
+    permissionPolicy: initialPermissionPolicy(options, workspace),
+  };
   const initialHistory = workspace.resumed ? visibleHistoryFromEvents(readEvents(workspace.sessionLogPath)) : [];
   if (options.once) {
     const screen = new ConsoleScreen({ color: options.color, workspace, initialHistory });
     const router = new PartyRouter({
-      participants: createParticipants(options),
+      participants: createParticipants(runtimeOptions),
       workspace,
       maxTurns: options.maxTurns,
       onEvent: (event) => screen.event(event),
@@ -1044,6 +1066,9 @@ export async function runCtxparty(options) {
     screen.header();
     screen.showResumedHistory();
     screen.status(`Session log: ${workspace.display.sessionLogPath}`);
+    if (shouldWarnMissingAcpx(runtimeOptions)) {
+      screen.error(acpxInstallHint());
+    }
     await router.submitUserMessage(options.once);
     await router.dispose();
     return;
@@ -1052,12 +1077,15 @@ export async function runCtxparty(options) {
   if (input.isTTY) {
     const screen = new PiTuiScreen({ workspace, initialHistory });
     const router = new PartyRouter({
-      participants: createParticipants(options),
+      participants: createParticipants(runtimeOptions),
       workspace,
       maxTurns: options.maxTurns,
       onEvent: (event) => screen.event(event),
     });
     screen.status(`Session log: ${workspace.display.sessionLogPath}`);
+    if (shouldWarnMissingAcpx(runtimeOptions)) {
+      screen.error(acpxInstallHint());
+    }
     await screen.start(
       async (text) => {
         if (text.startsWith("/")) {
@@ -1077,7 +1105,7 @@ export async function runCtxparty(options) {
 
   const screen = new ConsoleScreen({ color: options.color, workspace, initialHistory });
   const router = new PartyRouter({
-    participants: createParticipants(options),
+    participants: createParticipants(runtimeOptions),
     workspace,
     maxTurns: options.maxTurns,
     onEvent: (event) => screen.event(event),
@@ -1085,6 +1113,9 @@ export async function runCtxparty(options) {
   screen.header();
   screen.showResumedHistory();
   screen.status(`Session log: ${workspace.display.sessionLogPath}`);
+  if (shouldWarnMissingAcpx(runtimeOptions)) {
+    screen.error(acpxInstallHint());
+  }
 
   const rl = readline.createInterface({ input, output });
 

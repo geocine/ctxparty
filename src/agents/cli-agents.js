@@ -8,6 +8,8 @@ const DEFAULT_TIMEOUT_MS = 150000;
 const DEFAULT_ACPX_TTL_SECONDS = 300;
 const DEFAULT_PERMISSION_POLICY = "approve-reads";
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const HISTORY_MESSAGE_MAX_CHARS = 12000;
+const SHARED_CONTEXT_MAX_CHARS = 16000;
 const SNAPSHOT_MAX_FILES = 120;
 const SNAPSHOT_MAX_FILE_CHARS = 6000;
 const SNAPSHOT_KEY_FILES = [
@@ -114,14 +116,28 @@ function resolveAcpxCommand() {
   return bundledAcpxCommand() ?? findOnPath("acpx") ?? globalAcpxCommand() ?? "acpx";
 }
 
+export function isAcpxAvailable() {
+  return Boolean(bundledAcpxCommand() ?? findOnPath("acpx") ?? globalAcpxCommand());
+}
+
+export function acpxInstallHint() {
+  return "ACPX is required for the default real Codex/Claude backend. Install it with: npm i -g acpx";
+}
+
 function formatHistory(history = []) {
   if (!Array.isArray(history) || history.length === 0) {
     return "No prior visible messages.";
   }
 
   return history
-    .map((item) => `${item.author}: ${item.text}`)
+    .map((item) => `${item.author}: ${truncateForPrompt(item.text, HISTORY_MESSAGE_MAX_CHARS)}`)
     .join("\n");
+}
+
+function truncateForPrompt(text, maxChars) {
+  const value = String(text ?? "");
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n...[truncated ${value.length - maxChars} chars]`;
 }
 
 function toPortablePath(value) {
@@ -218,6 +234,16 @@ function firstReadmeParagraph(root) {
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#") && !line.startsWith("```"));
   return lines[0];
+}
+
+function readSharedContext(workspace) {
+  if (!workspace?.contextPath) return "No shared context file found.";
+  try {
+    const text = fs.readFileSync(workspace.contextPath, "utf8").trim();
+    return text ? truncateForPrompt(text, SHARED_CONTEXT_MAX_CHARS) : "Shared context is empty.";
+  } catch {
+    return "Shared context could not be read.";
+  }
 }
 
 function workspaceSnapshot(workspace) {
@@ -356,6 +382,9 @@ Rules:
 - If the incoming message is from another assistant and you have nothing useful to add, reply exactly: .....
 
 ${repositoryContext}
+
+Shared ctxparty context from ${context.workspace.display.contextPath}:
+${readSharedContext(context.workspace)}
 
 Conversation so far:
 ${formatHistory(context.history)}
@@ -754,7 +783,7 @@ function formatAgentError(label, error) {
     return message;
   }
   if (/\bENOENT\b/.test(message) || /spawn acpx/i.test(message)) {
-    return `${label} error: acpx was not found. ctxparty installs acpx as an optional dependency when your Node version supports it; otherwise use Node 22.12+ and reinstall ctxparty, or set CTXPARTY_AGENT_BACKEND=raw to use legacy CLI adapters.`;
+    return `${label} error: acpx was not found. ${acpxInstallHint()} Then run: acpx --version`;
   }
   if (/acpx(?:\.cmd)? exited with code \d+ without stderr output/i.test(message)) {
     return `${label} error: ${message}. This may be an ACPX permission or auth failure. Retry with --permission-policy approve-all, or set CTXPARTY_PERMISSION_POLICY=approve-all if you trust this workspace.`;

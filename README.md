@@ -1,110 +1,112 @@
 # ctxparty
 
-Context Party is a terminal workspace for coordinating multiple coding agents in one shared project session.
+Terminal workspace for coordinating Codex and Claude in one shared project session.
 
-It uses Pi's `@mariozechner/pi-tui` package for the interactive terminal UI, while keeping the runtime small and dependency-light. The current app:
+ctxparty creates a `__ctxparty__/` directory with:
 
-- creates a `__ctxparty__/` party workspace;
-- writes `context.md`, `files/`, `logs/`, and structured JSONL sessions;
-- starts an interactive terminal session;
-- routes user messages through real CLI-backed `Codex` and `Claude` participants by default;
-- sends unmentioned user messages to all participants once, and sends `@` mentions only to the requested participant(s);
-- supports core slash commands.
-
-Chat colors are intentionally simple: User and the title are green, Codex is blue, Claude is orange, and status/editor chrome is gray.
+- `context.md` for durable shared context passed to agents
+- `settings.json` for project-local settings such as ACPX permissions
+- `sessions/*.jsonl` for resumable transcripts
+- `logs/` and `files/` for run output and shared artifacts
 
 ## Install
 
-ctxparty supports Node.js 18.18.1 or newer.
-On Node 18, npm may warn that `@mariozechner/pi-tui` declares Node 20; ctxparty patches the installed TUI bundle during `postinstall` for Node 18 compatibility.
+Requirements:
 
-Install ctxparty globally:
+- Node.js 18.18.1 or newer
+- ACPX for the default real-agent backend
+- The agent CLIs you want to use, such as `codex` and/or `claude`, already authenticated
+
+Install:
 
 ```bash
 npm i -g ctxparty
+npm i -g acpx
+acpx --version
 ```
 
-From a local checkout, install the current package globally:
+From a local checkout:
 
 ```bash
 npm i -g
+npm i -g acpx
 ```
 
-After installation, run it from any project directory:
+On Node 18, npm may warn that `@mariozechner/pi-tui` declares Node 20; ctxparty patches the installed TUI bundle during `postinstall`.
+
+## Use
+
+Start in the current project:
 
 ```bash
 ctxparty
 ```
 
-Run against another project directory:
+Start in another project:
 
 ```bash
 ctxparty --cwd /path/to/project
 ```
 
-Run a single prompt and exit:
+Run one prompt and exit:
 
 ```bash
 ctxparty --once "review this project shape"
 ```
 
-Resume the latest session in a project:
+Resume the latest session:
 
 ```bash
 ctxparty --resume
 ```
 
-Resume a specific session file:
+Resume a specific session:
 
 ```bash
 ctxparty --resume __ctxparty__/sessions/2026-05-07T050444-392Z.jsonl
 ```
 
-Run one real adapter-backed prompt:
-
-```bash
-ctxparty --max-turns 2 --once "Keep this short and discuss one next step."
-```
-
-Run with mock participants for local smoke testing:
+Run without real agents for smoke testing:
 
 ```bash
 ctxparty --participants mock --once "review this project shape"
 ```
 
-## Development
-
-Run from the checkout:
-
-```bash
-npm start
-```
-
-One-shot smoke run:
-
-```bash
-npm run smoke
-```
-
 ## Commands
 
-- `/help`
-- `/agents`
-- message without `@` to ask all participants once
-- `@codex`, `@claude`, or `@all` in a message to request direct replies only
-- `/mute <participant>`
-- `/unmute <participant>`
-- `/permissions` to select the ACPX permission policy; `/permissions approve-all` to let agents proceed without prompts
-- `/workspace`
-- `/history`
-- `/resume` to show resumable sessions; `/resume <number|name|path>` to switch sessions
+- `/help` show commands
+- `/agents` list participants
+- `/permissions` choose ACPX permission policy
+- `/permissions approve-all` persist approve-all for this project directory
+- `/workspace` show ctxparty paths
+- `/history` replay visible history
+- `/resume` choose a session
+- `/resume <number|name|path>` resume a specific session
+- `/mute <participant>` and `/unmute <participant>`
 - `/clear`
 - `/quit`
 
-## Current Boundary
+Mention `@codex`, `@claude`, or `@all` to target participants. A message without a mention asks all active participants once.
 
-The visible assistant is a **Participant**. The implementation behind it is an **Agent Adapter**. By default, ctxparty uses `acpx` as the real agent backend for Codex and Claude, so agent traffic uses ACP sessions, structured streaming updates, queue-aware prompts, and cooperative cancellation instead of raw terminal scraping. ctxparty installs `acpx` as an optional dependency on Node versions that support it, and also falls back to an existing global `acpx` binary when present. Set `CTXPARTY_AGENT_BACKEND=raw` to use the legacy direct Codex/Claude CLI adapters. Mock adapters remain available with `--participants mock` for local smoke testing without external subscriptions.
+## ACPX
 
-The Pi TUI bridge lives in `src/pi-tui.js`; the rest of the app imports from that bridge rather than importing `@mariozechner/pi-tui` directly.
+ctxparty uses ACPX by default for Codex and Claude so it can stream structured agent output, tool calls, permission requests, cancellation, and warm per-project sessions.
 
-Real adapters live in `src/agents/cli-agents.js`. The acpx backend runs `acpx --format json --json-strict <agent> prompt -s <ctxparty-session> --file -` and streams ACP `agent_thought_chunk`, `tool_call`, and `agent_message_chunk` updates into the ctxparty UI. Some ACP adapters do not emit visible thought chunks for every model; ctxparty displays them when ACPX sends them and otherwise shows live elapsed progress while waiting for first output. ACPX sessions are scoped per project by default so agent backends can stay warm across ctxparty restarts. Set `CTXPARTY_ACPX_SESSION_SCOPE=session` to isolate ACPX sessions per ctxparty transcript, or `CTXPARTY_ACPX_SESSION_SCOPE=global` to use one global session name per agent. Set `CTXPARTY_PERMISSION_POLICY=approve-all` or start with `--permission-policy approve-all` when you trust the workspace and want ACPX permission requests approved automatically; the default is `approve-reads`. The raw fallback runs Codex through `codex exec --json` and Claude through lean print mode with `--bare`, default tools, no session persistence, and JSON output.
+If `acpx` is missing, install it:
+
+```bash
+npm i -g acpx
+acpx --version
+```
+
+Permission policy defaults to `approve-reads`. Use `/permissions approve-all` when you trust the project directory and want ACPX permission requests approved automatically. The setting is saved in `__ctxparty__/settings.json`.
+
+As a fallback, set `CTXPARTY_AGENT_BACKEND=raw` to use the older direct Codex/Claude CLI adapters without ACPX.
+
+## Development
+
+```bash
+npm start
+npm run smoke
+npm run check
+```
