@@ -374,6 +374,7 @@ Rules:
 - If responding to another assistant, address their point directly.
 - To hand work to another participant or ask them to reply, include an explicit @codex or @claude mention in your response.
 - Do not @mention another participant just to acknowledge agreement; that queues another turn.
+- When referring to another participant without handing off work, write their plain name without @, such as "Codex" or "Claude".
 - Use the conversation history below as shared context. If User asks what another participant said, answer from that history.
 - Do not rely on older ACP session memory over the ctxparty history below.
 - Never answer with a generic readiness acknowledgement when the incoming message asks a concrete question.
@@ -864,7 +865,7 @@ class AcpxCliAgent extends BaseCliAgent {
   }
 
   resolveSessionName(context) {
-    const scope = process.env.CTXPARTY_ACPX_SESSION_SCOPE?.trim().toLowerCase() || "project";
+    const scope = process.env.CTXPARTY_ACPX_SESSION_SCOPE?.trim().toLowerCase() || "session";
     if (scope === "session") return `${this.sessionName}-${sessionStem(context.workspace)}`;
     if (scope === "global") return this.sessionName;
     return `${this.sessionName}-${projectSessionStem(context.workspace)}`;
@@ -925,6 +926,36 @@ class AcpxCliAgent extends BaseCliAgent {
     this.readySessionNames.add(sessionName);
   }
 
+  async resetSession(context) {
+    const sessionName = this.resolveSessionName(context);
+    const acpx = this.acpxCommand();
+    try {
+      await runProcess({
+        command: acpx.command,
+        args: [
+          ...acpx.argsPrefix,
+          "--cwd",
+          context.workspace.projectRoot,
+          "--format",
+          "quiet",
+          this.acpxAgent,
+          "sessions",
+          "close",
+          sessionName,
+        ],
+        cwd: context.workspace.projectRoot,
+        timeoutMs: Math.min(this.timeoutMs, 30000),
+        signal: context.signal,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/No named session/i.test(message)) throw error;
+    } finally {
+      this.readySessionNames.delete(sessionName);
+    }
+    return sessionName;
+  }
+
   async *send(message, context) {
     if (context.signal?.aborted) return;
 
@@ -965,6 +996,7 @@ class AcpxCliAgent extends BaseCliAgent {
               type: "status",
               participantId: this.id,
               text: item.text,
+              heartbeat: item.heartbeat,
             };
           }
           continue;

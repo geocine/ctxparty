@@ -41,6 +41,7 @@ Interactive commands:
   /mute <participant>    Mute a participant.
   /unmute <participant>  Unmute a participant.
   /permissions [policy]  Show or set ACPX permission policy.
+  /reset-agent <agent>   Reset an ACPX agent session.
   /workspace             Show workspace paths.
   /history               Replay visible message history.
   /resume [session]      Show resumable sessions, or resume one by number/name/path.

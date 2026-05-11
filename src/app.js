@@ -903,6 +903,7 @@ function commandHelp() {
     "/mute <participant>    Mute a participant.",
     "/unmute <participant>  Unmute a participant.",
     "/permissions [policy]  Show or set ACPX permission policy.",
+    "/reset-agent <agent>   Reset an ACPX agent session.",
     "/workspace             Show workspace paths.",
     "/history               Replay visible message history.",
     "/resume [session]      Show resumable sessions, or resume one by number/name/path.",
@@ -985,6 +986,21 @@ async function handleCommand(inputText, router, screen) {
       screen.status(`Permission policy: ${permissionPolicyText(policy)}`);
     } else {
       screen.status("Permission policy only applies to ACPX real agents.");
+    }
+    return true;
+  }
+  if (command === "/reset-agent") {
+    if (!arg.trim()) {
+      screen.error("Usage: /reset-agent <codex|claude>");
+      return true;
+    }
+    try {
+      const reset = await router.resetParticipant(normalizeParticipantName(arg));
+      if (reset) {
+        screen.status(`Reset ${reset.participant.label} ACPX session: ${reset.sessionName}`);
+      }
+    } catch (error) {
+      screen.error(error instanceof Error ? error.message : String(error));
     }
     return true;
   }

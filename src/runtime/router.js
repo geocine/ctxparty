@@ -3,6 +3,7 @@ import { appendEvent, readEvents, visibleHistoryFromEvents } from "./transcript.
 import { setWorkspacePermissionPolicy } from "./workspace.js";
 
 const MAX_AGENT_CONTEXT_MESSAGES = 24;
+const MAX_PERSISTED_STATUS_TEXT = 240;
 
 function now() {
   return new Date().toISOString();
@@ -41,6 +42,21 @@ function historyItemFromMessage(message) {
 
 function withoutSelf(participantIds, participantId) {
   return participantIds.filter((id) => id !== participantId);
+}
+
+function compactStatusText(text) {
+  const value = String(text ?? "");
+  if (value.length <= MAX_PERSISTED_STATUS_TEXT) return value;
+  return `${value.slice(0, MAX_PERSISTED_STATUS_TEXT)} ...[truncated ${value.length - MAX_PERSISTED_STATUS_TEXT} chars]`;
+}
+
+function eventForTranscript(event) {
+  if (event.type !== "status") return event;
+  if (event.heartbeat) return undefined;
+  return {
+    ...event,
+    text: compactStatusText(event.text),
+  };
 }
 
 export class PartyRouter {
@@ -94,6 +110,48 @@ export class PartyRouter {
     return changed;
   }
 
+  async resetParticipant(participantName) {
+    if (this.routing) {
+      this.emit({
+        type: "status",
+        text: "A message is already being routed. Press Esc to interrupt it before resetting an agent.",
+      });
+      return undefined;
+    }
+    if (this.abortController.signal.aborted) {
+      this.abortController = new AbortController();
+    }
+    const normalized = participantName.trim().toLowerCase();
+    const participant = this.participants.find(
+      (item) => item.id === normalized || item.label.toLowerCase() === normalized,
+    );
+    if (!participant) {
+      this.emit({
+        type: "error",
+        text: `No participant named ${participantName}`,
+      });
+      return undefined;
+    }
+    if (typeof participant.resetSession !== "function") {
+      this.emit({
+        type: "status",
+        text: `${participant.label} does not have a resettable ACPX session.`,
+      });
+      return undefined;
+    }
+    const sessionName = await participant.resetSession({
+      workspace: this.workspace,
+      signal: this.abortController.signal,
+    });
+    appendEvent(this.workspace, {
+      type: "agent_session_reset",
+      participantId: participant.id,
+      sessionName,
+      timestamp: now(),
+    });
+    return { participant, sessionName };
+  }
+
   participantAliases() {
     const aliases = new Map();
     for (const participant of this.participants) {
@@ -108,7 +166,7 @@ export class PartyRouter {
 
     const mentioned = [];
     const unknown = [];
-    const mentionPattern = /(^|\s)@([a-zA-Z][\w-]*)\b/g;
+    const mentionPattern = /(^|\s)@([a-zA-Z][\w-]*)\b(?!['’])/g;
     for (const match of text.matchAll(mentionPattern)) {
       const rawName = match[2].toLowerCase();
       if (rawName === "all") {
@@ -386,10 +444,13 @@ export class PartyRouter {
             flushStreamedReply();
           }
           this.emit(event);
-          appendEvent(this.workspace, {
-            ...event,
-            timestamp: now(),
-          });
+          const transcriptEvent = eventForTranscript(event);
+          if (transcriptEvent) {
+            appendEvent(this.workspace, {
+              ...transcriptEvent,
+              timestamp: now(),
+            });
+          }
         }
       }
       flushStreamedReply();

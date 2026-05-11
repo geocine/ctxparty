@@ -78,6 +78,7 @@ ctxparty --participants mock --once "review this project shape"
 - `/agents` list participants
 - `/permissions` choose ACPX permission policy
 - `/permissions approve-all` persist approve-all for this project directory
+- `/reset-agent codex` or `/reset-agent claude` close and recreate a stuck ACPX session
 - `/workspace` show ctxparty paths
 - `/history` replay visible history
 - `/resume` choose a session
@@ -90,7 +91,7 @@ Mention `@codex`, `@claude`, or `@all` to target participants. A message without
 
 ## ACPX
 
-ctxparty uses ACPX by default for Codex and Claude so it can stream structured agent output, tool calls, permission requests, cancellation, and warm per-project sessions.
+ctxparty uses ACPX by default for Codex and Claude so it can stream structured agent output, tool calls, permission requests, and cancellation.
 
 If `acpx` is missing, install it:
 
@@ -100,6 +101,8 @@ acpx --version
 ```
 
 Permission policy defaults to `approve-reads`. Use `/permissions approve-all` when you trust the project directory and want ACPX permission requests approved automatically. The setting is saved in `__ctxparty__/settings.json`.
+
+ACPX sessions are scoped per ctxparty transcript by default to avoid carrying oversized or polluted agent state into later sessions. Set `CTXPARTY_ACPX_SESSION_SCOPE=project` to reuse one warm session per project, or `CTXPARTY_ACPX_SESSION_SCOPE=global` to reuse one session per agent.
 
 As a fallback, set `CTXPARTY_AGENT_BACKEND=raw` to use the older direct Codex/Claude CLI adapters without ACPX.
 
