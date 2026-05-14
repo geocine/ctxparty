@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_TIMEOUT_MS = 150000;
+const DEFAULT_TIMEOUT_MS = 1800000;
 const DEFAULT_ACPX_TTL_SECONDS = 300;
 const DEFAULT_PERMISSION_POLICY = "approve-reads";
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -735,9 +735,10 @@ function parseAcpTextContent(content) {
 }
 
 function summarizeAcpTool(update) {
-  const title = update.title || update.name || update.toolCallId || "tool";
+  const title = update.title || update.name;
+  if (!title && !update.status) return undefined;
   const status = update.status ? ` (${update.status})` : "";
-  return `${title}${status}`;
+  return `${title || update.toolCallId || "tool"}${status}`;
 }
 
 function parseAcpStreamLine(line) {
@@ -758,7 +759,8 @@ function parseAcpStreamLine(line) {
     return text ? [{ type: "thought_delta", text }] : [];
   }
   if (update?.sessionUpdate === "tool_call" || update?.sessionUpdate === "tool_call_update") {
-    return [{ type: "status", text: `tool: ${summarizeAcpTool(update)}` }];
+    const tool = summarizeAcpTool(update);
+    return tool ? [{ type: "status", text: `tool: ${tool}` }] : [];
   }
   if (update?.sessionUpdate === "plan" && Array.isArray(update.entries)) {
     const plan = update.entries.map((entry) => `[${entry.status}] ${entry.content}`).join("; ");
@@ -785,6 +787,9 @@ function formatAgentError(label, error) {
   }
   if (/\bENOENT\b/.test(message) || /spawn acpx/i.test(message)) {
     return `${label} error: acpx was not found. ${acpxInstallHint()} Then run: acpx --version`;
+  }
+  if (/Queue owner disconnected before prompt completion/i.test(message)) {
+    return `${label} error: ACPX session owner disconnected before the prompt completed. Partial output was preserved if available. Run /reset-agent ${label.toLowerCase()} and retry; for long builds, raise --agent-timeout-ms.`;
   }
   if (/acpx(?:\.cmd)? exited with code \d+ without stderr output/i.test(message)) {
     return `${label} error: ${message}. This may be an ACPX permission or auth failure. Retry with --permission-policy approve-all, or set CTXPARTY_PERMISSION_POLICY=approve-all if you trust this workspace.`;
@@ -973,6 +978,7 @@ class AcpxCliAgent extends BaseCliAgent {
       const acpx = this.acpxCommand();
       const sessionName = this.resolveSessionName(context);
       let text = "";
+      let lastStatusText = "";
       for await (const item of streamProcess({
         command: acpx.command,
         args: [
@@ -1024,10 +1030,13 @@ class AcpxCliAgent extends BaseCliAgent {
               text: event.text,
             };
           } else if (event.type === "status") {
+            const statusText = `${this.label} ${event.text}`;
+            if (statusText === lastStatusText) continue;
+            lastStatusText = statusText;
             yield {
               type: "status",
               participantId: this.id,
-              text: `${this.label} ${event.text}`,
+              text: statusText,
             };
           } else if (event.type === "error") {
             throw new Error(event.text);

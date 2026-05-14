@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 const MIN_NODE_VERSION = [18, 18, 1];
+const DEFAULT_AGENT_TIMEOUT_MS = 1800000;
 
 function isSupportedNodeVersion(version) {
   const [major = 0, minor = 0, patch = 0] = version.split(".").map((part) => Number.parseInt(part, 10));
@@ -25,7 +26,7 @@ Options:
   --cwd <path>           Project directory where __ctxparty__/ is created.
   --resume [session]     Resume latest session, or the named/path JSONL session.
   --max-turns <number>   Maximum routed messages per user submission. Default: 8.
-  --agent-timeout-ms <n> Timeout per participant call. Default: 150000.
+  --agent-timeout-ms <n> Timeout per participant call. Default: ${DEFAULT_AGENT_TIMEOUT_MS} (30 minutes).
   --permission-policy <p> ACPX permissions: approve-reads, approve-all, deny, or fail.
                          Default: CTXPARTY_PERMISSION_POLICY or approve-reads.
   --no-color             Disable ANSI colors.
@@ -58,7 +59,7 @@ function parseArgs(argv) {
     once: undefined,
     participants: "real",
     resume: false,
-    agentTimeoutMs: 150000,
+    agentTimeoutMs: DEFAULT_AGENT_TIMEOUT_MS,
     permissionPolicy: process.env.CTXPARTY_PERMISSION_POLICY || "approve-reads",
     permissionPolicySource: process.env.CTXPARTY_PERMISSION_POLICY ? "env" : "default",
   };

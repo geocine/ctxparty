@@ -104,6 +104,8 @@ Permission policy defaults to `approve-reads`. Use `/permissions approve-all` wh
 
 ACPX sessions are scoped per ctxparty transcript by default to avoid carrying oversized or polluted agent state into later sessions. Set `CTXPARTY_ACPX_SESSION_SCOPE=project` to reuse one warm session per project, or `CTXPARTY_ACPX_SESSION_SCOPE=global` to reuse one session per agent.
 
+Agent calls default to a 30 minute timeout. Long builds or packaging jobs can exceed that; use `--agent-timeout-ms <milliseconds>` to raise the limit for those sessions.
+
 As a fallback, set `CTXPARTY_AGENT_BACKEND=raw` to use the older direct Codex/Claude CLI adapters without ACPX.
 
 ## Development
