@@ -1,6 +1,8 @@
 import fs from "node:fs";
+import path from "node:path";
 
 export function appendEvent(workspace, event) {
+  fs.mkdirSync(path.dirname(workspace.sessionLogPath), { recursive: true });
   fs.appendFileSync(workspace.sessionLogPath, `${JSON.stringify(event)}\n`, "utf8");
 }
 
