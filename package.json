@@ -11,7 +11,6 @@
     "README.md"
   ],
   "scripts": {
-    "postinstall": "node src/install/patch-pi-tui-node18.js",
     "start": "node src/cli.js",
     "smoke": "node src/cli.js --cwd .ctxparty-smoke --participants mock --once \"sketch the project shape\"",
     "demo:real": "node src/cli.js --cwd .ctxparty-real-demo --demo-real --no-color",

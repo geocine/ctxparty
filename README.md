@@ -32,8 +32,6 @@ npm i -g
 npm i -g acpx
 ```
 
-On Node 18, npm may warn that `@mariozechner/pi-tui` declares Node 20; ctxparty patches the installed TUI bundle during `postinstall`.
-
 ## Use
 
 Start in the current project:
